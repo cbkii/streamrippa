@@ -45,6 +45,7 @@ class PendingPlaylistTrack(Pending):
     async def resolve(self) -> Track | None:
         if self.db.downloaded(self.id):
             logger.info(f"Track ({self.id}) already logged in database. Skipping.")
+            self.db.set_skipped()
             return None
         try:
             resp = await self.client.get_metadata(self.id, "track")

@@ -12,6 +12,17 @@ from typing import Final
 logger = logging.getLogger("streamrip")
 
 
+@dataclass
+class SessionStats:
+    """Counters for one rip session, used for the final summary."""
+
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    retried: int = 0
+    validation_failures: int = 0
+
+
 class DatabaseInterface(ABC):
     @abstractmethod
     def create(self):
@@ -232,12 +243,22 @@ class Database:
     downloads: DatabaseInterface
     failed: DatabaseInterface
     failed_log: FailedTrackLog | None = field(default=None)
+    stats: SessionStats = field(default_factory=SessionStats)
 
     def downloaded(self, item_id: str) -> bool:
         return self.downloads.contains(id=item_id)
 
     def set_downloaded(self, item_id: str):
         self.downloads.add((item_id,))
+        self.stats.succeeded += 1
+
+    def set_skipped(self):
+        """Increment the skipped counter (track already downloaded or file exists)."""
+        self.stats.skipped += 1
+
+    def add_retry(self):
+        """Increment the retry counter."""
+        self.stats.retried += 1
 
     def get_failed_downloads(self) -> list[tuple[str, str, str]]:
         return self.failed.all()
@@ -250,9 +271,13 @@ class Database:
         title: str = "",
         artist: str = "",
         error: str = "",
+        is_validation_failure: bool = False,
     ):
         """Record a failed download in the SQLite database and, if configured,
         append a row to the human-readable CSV log."""
         self.failed.add((source, media_type, id))
+        self.stats.failed += 1
+        if is_validation_failure:
+            self.stats.validation_failures += 1
         if self.failed_log is not None:
             self.failed_log.log(source, media_type, id, title=title, artist=artist, error=error)

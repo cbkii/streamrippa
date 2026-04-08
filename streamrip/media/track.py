@@ -44,6 +44,8 @@ class Track(Media):
             )
             if not self.db.downloaded(self.meta.info.id):
                 self.db.set_downloaded(self.meta.info.id)
+            else:
+                self.db.set_skipped()
             if self.is_single:
                 remove_title(self.meta.title)
             return
@@ -57,54 +59,116 @@ class Track(Media):
             add_title(self.meta.title)
 
     async def download(self):
-        # TODO: progress bar description
-        async with global_download_semaphore(self.config.session.downloads):
-            with get_progress_callback(
-                self.config.session.cli.progress_bars,
-                await self.downloadable.size(),
-                f"Track {self.meta.tracknumber}",
-            ) as callback:
-                try:
-                    await self.downloadable.download(self.download_path, callback)
-                    retry = False
-                except Exception as e:
-                    logger.error(
-                        f"Error downloading track '{self.meta.title}', retrying: {e}"
-                    )
-                    retry = True
+        reliability = self.config.session.reliability
+        max_retries = reliability.retry_count
+        delay = reliability.retry_delay
+        backoff = reliability.retry_backoff_factor
 
-            if not retry:
-                return
+        last_exc: Exception | None = None
 
-            with get_progress_callback(
-                self.config.session.cli.progress_bars,
-                await self.downloadable.size(),
-                f"Track {self.meta.tracknumber} (retry)",
-            ) as callback:
-                try:
-                    await self.downloadable.download(self.download_path, callback)
-                except Exception as e:
-                    logger.error(
-                        f"Persistent error downloading track '{self.meta.title}', skipping: {e}"
-                    )
-                    self.db.set_failed(
-                        self.downloadable.source,
-                        "track",
-                        self.meta.info.id,
-                        title=self.meta.title,
-                        artist=self.meta.artist,
-                        error=str(e),
-                    )
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                wait = delay * (backoff ** (attempt - 1))
+                logger.info(
+                    "Retry %d/%d for '%s' in %.1fs...",
+                    attempt,
+                    max_retries,
+                    self.meta.title,
+                    wait,
+                )
+                self.db.add_retry()
+                await asyncio.sleep(wait)
+
+            label = f"Track {self.meta.tracknumber}"
+            if attempt > 0:
+                label = f"{label} (retry {attempt}/{max_retries})"
+
+            async with global_download_semaphore(self.config.session.downloads):
+                with get_progress_callback(
+                    self.config.session.cli.progress_bars,
+                    await self.downloadable.size(),
+                    label,
+                ) as callback:
+                    try:
+                        await self.downloadable.download(self.download_path, callback)
+                        return  # success
+                    except Exception as e:
+                        last_exc = e
+                        if attempt < max_retries:
+                            logger.warning(
+                                "Download attempt %d/%d failed for '%s': %s",
+                                attempt + 1,
+                                max_retries + 1,
+                                self.meta.title,
+                                e,
+                            )
+                        else:
+                            logger.error(
+                                "Persistent error downloading '%s' after %d attempt(s): %s",
+                                self.meta.title,
+                                max_retries + 1,
+                                e,
+                            )
+
+        # All retries exhausted
+        self.db.set_failed(
+            self.downloadable.source,
+            "track",
+            self.meta.info.id,
+            title=self.meta.title,
+            artist=self.meta.artist,
+            error=str(last_exc),
+        )
 
     async def postprocess(self):
         if self.is_single:
             remove_title(self.meta.title)
 
         await tag_file(self.download_path, self.meta, self.cover_path)
+
+        # Validate FLAC integrity if enabled and the output file is FLAC
+        if (
+            self.config.session.reliability.validate_flac
+            and self.download_path.lower().endswith(".flac")
+        ):
+            await self._validate_flac()
+
         if self.config.session.conversion.enabled:
             await self._convert()
 
         self.db.set_downloaded(self.meta.info.id)
+
+    async def _validate_flac(self):
+        """Verify FLAC file integrity using mutagen.
+
+        Raises if the file is corrupt or invalid so the track is treated as
+        failed rather than being silently stored as a bad download.
+        """
+        from mutagen.flac import FLAC as MutagenFLAC
+        from mutagen.flac import FLACNoHeaderError
+
+        try:
+            MutagenFLAC(self.download_path)
+        except (FLACNoHeaderError, Exception) as e:
+            logger.error(
+                "FLAC validation failed for '%s': %s — removing corrupt file.",
+                self.meta.title,
+                e,
+            )
+            try:
+                os.remove(self.download_path)
+            except OSError:
+                pass
+            self.db.set_failed(
+                self.downloadable.source,
+                "track",
+                self.meta.info.id,
+                title=self.meta.title,
+                artist=self.meta.artist,
+                error=f"FLAC validation failed: {e}",
+                is_validation_failure=True,
+            )
+            raise ValueError(f"FLAC validation failed for '{self.meta.title}': {e}") from e
 
     async def _convert(self):
         c = self.config.session.conversion
@@ -150,6 +214,7 @@ class PendingTrack(Pending):
             logger.info(
                 f"Skipping track {self.id}. Marked as downloaded in the database.",
             )
+            self.db.set_skipped()
             return None
 
         source = self.client.source
@@ -213,6 +278,7 @@ class PendingSingle(Pending):
             logger.info(
                 f"Skipping track {self.id}. Marked as downloaded in the database.",
             )
+            self.db.set_skipped()
             return None
 
         try:

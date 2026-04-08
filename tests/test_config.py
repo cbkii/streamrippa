@@ -19,6 +19,7 @@ from streamrip.config import (
     MiscConfig,
     QobuzConfig,
     QobuzDiscographyFilterConfig,
+    ReliabilityConfig,
     SoundcloudConfig,
     TidalConfig,
     YoutubeConfig,
@@ -136,7 +137,7 @@ def test_config_file_update():
     assert toml["cli"]["text_output"] is True  # type: ignore
     assert toml["cli"]["progress_bars"] is True  # type: ignore
     assert toml["cli"]["max_search_results"] == 100  # type: ignore
-    assert toml["misc"]["version"] == "2.2.0"  # type: ignore
+    assert toml["misc"]["version"] == "2.3.0"  # type: ignore
     assert "YouTubeVideos" in str(toml["youtube"]["video_downloads_folder"])
     # type: ignore
     os.remove("tests/test_config_old2.toml")
@@ -240,6 +241,13 @@ def test_sample_config_data_fields(sample_config_data):
             failed_downloads_path="faileddownloadspath",
             failed_downloads_log_path="faileddownloadslogpath",
         ),
+        reliability=ReliabilityConfig(
+            retry_count=3,
+            retry_delay=2.0,
+            retry_backoff_factor=2.0,
+            fail_fast=False,
+            validate_flac=True,
+        ),
         conversion=ConversionConfig(
             enabled=False,
             codec="ALAC",
@@ -262,6 +270,7 @@ def test_sample_config_data_fields(sample_config_data):
     assert sample_config_data.metadata == test_config.metadata
     assert sample_config_data.qobuz_filters == test_config.qobuz_filters
     assert sample_config_data.database == test_config.database
+    assert sample_config_data.reliability == test_config.reliability
     assert sample_config_data.conversion == test_config.conversion
 
 

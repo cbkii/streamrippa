@@ -17,7 +17,7 @@ logger = logging.getLogger("streamrip")
 APP_DIR = click.get_app_dir("streamrip")
 os.makedirs(APP_DIR, exist_ok=True)
 DEFAULT_CONFIG_PATH = os.path.join(APP_DIR, "config.toml")
-CURRENT_CONFIG_VERSION = "2.2.0"
+CURRENT_CONFIG_VERSION = "2.3.0"
 
 
 class OutdatedConfigError(Exception):
@@ -104,6 +104,23 @@ class DatabaseConfig:
     # Path to a CSV log of failed downloads (title, artist, error).
     # Leave empty to use the default path in the app directory.
     failed_downloads_log_path: str
+
+
+@dataclass(slots=True)
+class ReliabilityConfig:
+    # Number of times to retry a failed download before giving up (0 = no retry)
+    retry_count: int
+    # Initial delay in seconds before the first retry
+    retry_delay: float
+    # Multiplier applied to delay after each retry for exponential backoff
+    # delay after attempt N = retry_delay * (retry_backoff_factor ^ (N-1))
+    retry_backoff_factor: float
+    # Stop the entire run immediately on the first failure.
+    # By default (false), all items are attempted and failures are reported at the end.
+    fail_fast: bool
+    # Verify downloaded FLAC files for integrity using mutagen.
+    # Corrupt files are removed and recorded in the failed-downloads log.
+    validate_flac: bool
 
 
 @dataclass(slots=True)
@@ -265,6 +282,7 @@ class ConfigData:
 
     cli: CliConfig
     database: DatabaseConfig
+    reliability: ReliabilityConfig
     conversion: ConversionConfig
 
     misc: MiscConfig
@@ -293,6 +311,7 @@ class ConfigData:
         qobuz_filters = QobuzDiscographyFilterConfig(**toml["qobuz_filters"])  # type: ignore
         cli = CliConfig(**toml["cli"])  # type: ignore
         database = DatabaseConfig(**toml["database"])  # type: ignore
+        reliability = ReliabilityConfig(**toml["reliability"])  # type: ignore
         conversion = ConversionConfig(**toml["conversion"])  # type: ignore
         misc = MiscConfig(**toml["misc"])  # type: ignore
 
@@ -311,6 +330,7 @@ class ConfigData:
             qobuz_filters=qobuz_filters,
             cli=cli,
             database=database,
+            reliability=reliability,
             conversion=conversion,
             misc=misc,
         )
@@ -341,6 +361,7 @@ class ConfigData:
         update_toml_section_from_config(self.toml["qobuz_filters"], self.qobuz_filters)
         update_toml_section_from_config(self.toml["cli"], self.cli)
         update_toml_section_from_config(self.toml["database"], self.database)
+        update_toml_section_from_config(self.toml["reliability"], self.reliability)
         update_toml_section_from_config(self.toml["conversion"], self.conversion)
 
     def get_source(

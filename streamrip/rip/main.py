@@ -157,8 +157,16 @@ class Main:
 
     async def resolve(self):
         """Resolve all currently pending items."""
+
+        async def _safe_resolve(p):
+            try:
+                return await p.resolve()
+            except Exception as e:
+                logger.error("Error resolving item: %s", e)
+                return None
+
         with console.status("Resolving URLs...", spinner="dots"):
-            coros = [p.resolve() for p in self.pending]
+            coros = [_safe_resolve(p) for p in self.pending]
             new_media: list[Media] = [
                 m for m in await asyncio.gather(*coros) if m is not None
             ]
@@ -166,29 +174,69 @@ class Main:
         self.media.extend(new_media)
         self.pending.clear()
 
-    async def rip(self):
-        """Download all resolved items."""
-        results = await asyncio.gather(
-            *[item.rip() for item in self.media], return_exceptions=True
-        )
+    async def rip(self) -> int:
+        """Download all resolved items.
 
-        failed_items = 0
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"Error processing media item: {result}")
-                failed_items += 1
+        Returns:
+            Number of top-level failures (excludes track-level failures
+            already recorded in ``self.database.stats``).
+        """
+        reliability = self.config.session.reliability
+        top_level_failures = 0
 
-        if failed_items > 0:
-            total_items = len(self.media)
-            logger.info(
-                f"Download completed with {failed_items} failed items out of {total_items} total items."
+        if reliability.fail_fast:
+            for item in self.media:
+                failures_before = self.database.stats.failed
+                try:
+                    await item.rip()
+                except Exception as e:
+                    logger.error("Fatal error processing media item: %s", e)
+                    top_level_failures += 1
+                    break
+
+                if self.database.stats.failed > failures_before:
+                    console.print(
+                        "[red]Fail-fast: stopping after first failure.[/red]"
+                    )
+                    break
+        else:
+            results = await asyncio.gather(
+                *[item.rip() for item in self.media], return_exceptions=True
             )
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Error processing media item: %s", result)
+                    top_level_failures += 1
+
+        self._print_session_summary(top_level_failures)
+        return top_level_failures + self.database.stats.failed
+
+    def _print_session_summary(self, top_level_failures: int = 0):
+        """Print a human-readable summary at the end of the session."""
+        stats = self.database.stats
+        total_failures = stats.failed + top_level_failures
+
+        parts = [
+            f"[green]{stats.succeeded} succeeded[/green]",
+            f"[red]{total_failures} failed[/red]",
+            f"[yellow]{stats.skipped} skipped[/yellow]",
+        ]
+        if stats.retried > 0:
+            parts.append(f"[cyan]{stats.retried} retry attempt(s)[/cyan]")
+        if stats.validation_failures > 0:
+            parts.append(
+                f"[magenta]{stats.validation_failures} FLAC validation failure(s)[/magenta]"
+            )
+
+        console.print("\n[bold]Session summary:[/bold] " + ", ".join(parts))
 
         failed_log = self.database.failed_log
         if failed_log is not None and failed_log.has_entries:
             console.print(
-                f"[yellow]Some tracks failed to download. "
-                f"Details logged to: [cyan]{failed_log.path}"
+                f"[yellow]Failed download details logged to: [cyan]{failed_log.path}"
+            )
+            console.print(
+                "[dim]Run [bold]rip repair[/bold] to retry failed downloads.[/dim]"
             )
 
     async def search_interactive(self, source: str, media_type: str, query: str):
