@@ -1,11 +1,11 @@
-![streamrip logo](https://github.com/nathom/streamrip/blob/dev/demo/logo.svg?raw=true)
+![streamrip logo](https://github.com/cbkii/streamrippa/blob/dev/demo/logo.svg?raw=true)
 
 [![Downloads](https://pepy.tech/badge/streamrip)](https://pepy.tech/project/streamrip)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/python/black)
 
 A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 
-![downloading an album](https://github.com/nathom/streamrip/blob/dev/demo/download_album.png?raw=true)
+![downloading an album](https://github.com/cbkii/streamrippa/blob/dev/demo/download_album.png?raw=true)
 
 ## Features
 
@@ -41,7 +41,7 @@ pip3 install streamrip --upgrade
 If you run into issues, try installing directly from the `dev` branch:
 
 ```bash
-pip3 install git+https://github.com/nathom/streamrip.git@dev
+pip3 install git+https://github.com/cbkii/streamrippa.git@dev
 ```
 
 When you type
@@ -50,7 +50,7 @@ When you type
 rip
 ```
 
-it should show the main help page. If you have no idea what these mean, or are having other issues installing, check out the [detailed installation instructions](https://github.com/nathom/streamrip/wiki#detailed-installation-instructions).
+it should show the main help page. If you have no idea what these mean, or are having other issues installing, check out the [detailed installation instructions](https://github.com/cbkii/streamrippa/wiki#detailed-installation-instructions).
 
 For Arch Linux users, an AUR package exists. Make sure to install required packages from the AUR before using `makepkg` or use an AUR helper to automatically resolve them.
 ```
@@ -74,7 +74,7 @@ If you want to get access to the latest and greatest features without waiting fo
 from the `dev` branch with the following command
 
 ```bash
-pip3 install git+https://github.com/nathom/streamrip.git@dev
+pip3 install git+https://github.com/cbkii/streamrippa.git@dev
 ```
 
 ## Example Usage
@@ -121,7 +121,7 @@ Search for playlists matching `rap` on Tidal
 rip search tidal playlist 'rap'
 ```
 
-![streamrip interactive search](https://github.com/nathom/streamrip/blob/dev/demo/playlist_search.png?raw=true)
+![streamrip interactive search](https://github.com/cbkii/streamrippa/blob/dev/demo/playlist_search.png?raw=true)
 
 Search for *Rumours* on Tidal, and download it
 
@@ -216,11 +216,11 @@ If you're confused about anything, see the help pages. The main help pages can b
 rip url --help
 ```
 
-![example_help_page.png](https://github.com/nathom/streamrip/blob/dev/demo/example_help_page.png?raw=true)
+![example_help_page.png](https://github.com/cbkii/streamrippa/blob/dev/demo/example_help_page.png?raw=true)
 
 ## Other information
 
-For more in-depth information about `streamrip`, see the help pages and the [wiki](https://github.com/nathom/streamrip/wiki/).
+For more in-depth information about `streamrip`, see the help pages and the [wiki](https://github.com/cbkii/streamrippa/wiki/).
 
 ## Contributions
 
