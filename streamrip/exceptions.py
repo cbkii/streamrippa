@@ -68,3 +68,11 @@ class NonStreamableError(Exception):
 
 class ConversionError(Exception):
     """ConversionError."""
+
+
+class DownloadError(Exception):
+    """Raised when a track download fails after all retries are exhausted.
+
+    This is the canonical signal that ``Track.download()`` has given up so
+    that ``Track.rip()`` can skip post-processing and success bookkeeping.
+    """

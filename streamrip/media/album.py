@@ -66,18 +66,21 @@ class PendingAlbum(Pending):
             logger.error(
                 f"Album {self.id} not available to stream on {self.client.source} ({e})",
             )
+            self.db.set_failed(self.client.source, "album", self.id, error=str(e))
             return None
 
         try:
             meta = AlbumMetadata.from_album_resp(resp, self.client.source)
         except Exception as e:
             logger.error(f"Error building album metadata for {id=}: {e}")
+            self.db.set_failed(self.client.source, "album", self.id, error=str(e))
             return None
 
         if meta is None:
             logger.error(
                 f"Album {self.id} not available to stream on {self.client.source}",
             )
+            self.db.set_failed(self.client.source, "album", self.id)
             return None
 
         tracklist = get_album_track_ids(self.client.source, resp)

@@ -99,6 +99,10 @@ downloads_path = ""
 # called to retry the downloads
 failed_downloads_enabled = true
 failed_downloads_path = ""
+# Path to a CSV file where failed downloads are logged with track details (title, artist, error)
+# This file can be opened in any spreadsheet application for auditing and retry planning
+# Leave empty to use the default path in the app directory
+failed_downloads_log_path = ""
 
 # Convert tracks to a codec after downloading them.
 [conversion]
@@ -191,8 +195,24 @@ progress_bars = true
 # The maximum number of search results to show in the interactive menu
 max_search_results = 100
 
+# Reliability settings for batch and long-running workflows
+[reliability]
+# Number of times to retry a failed download before giving up (0 = no retry)
+retry_count = 3
+# Initial delay in seconds before the first retry
+retry_delay = 2.0
+# Multiplier applied to delay after each retry (exponential backoff)
+# e.g. with delay=2 and factor=2: waits 2s, 4s, 8s between successive retries
+retry_backoff_factor = 2.0
+# Stop the entire run immediately on the first failure.
+# By default (false) all items are attempted and failures are reported at the end.
+fail_fast = false
+# Verify downloaded FLAC files for integrity using mutagen.
+# Corrupt files are removed and recorded in the failed-downloads log.
+validate_flac = true
+
 [misc]
 # Metadata to identify this config file. Do not change.
-version = "2.2.0"
+version = "2.3.0"
 # Print a message if a new version of streamrip is available 
 check_for_updates = true

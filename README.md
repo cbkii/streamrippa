@@ -19,6 +19,17 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 - Highly customizable through the config file
 - Integration with `youtube-dl`
 
+### Reliability features (batch / long-run workflows)
+
+- **Continue-on-error** — one failed track or album never aborts the whole run; failures are logged and the run continues
+- **Bounded retry with exponential backoff** — configurable retry count and delay per track download
+- **FLAC integrity validation** — corrupt FLAC files are detected with `mutagen`, removed, and recorded for replay
+- **Persistent failed-item tracking** — every failure is written to the SQLite failed-downloads database and an auditable CSV log
+- **`rip repair`** — replay all previously failed items without redoing successful ones
+- **Session summary** — every run ends with a concise table: succeeded / failed / skipped / retried / validation-failures
+- **Non-zero exit codes** — the process exits with code 1 when any item fails, making scripted/CI use reliable
+- **`--fail-fast`** — stop after the first failure for strict pipelines
+
 ## Installation
 
 First, ensure [Python](https://www.python.org/downloads/) (version 3.10 or greater) and [pip](https://pip.pypa.io/en/stable/installing/) are installed. Then install `ffmpeg`. You may choose not to install this, but some functionality will be limited.
@@ -128,6 +139,75 @@ For more customization, see the config file
 
 ```
 rip config open
+```
+
+### Reliability and batch usage
+
+By default streamrip will continue past any single failure in a batch run and print a summary at the end:
+
+```
+Session summary: 14 succeeded, 1 failed, 2 skipped
+Failed download details logged to: ~/.config/streamrip/failed_downloads.csv
+Run rip repair to retry failed downloads.
+```
+
+#### Retry failed downloads
+
+```bash
+rip repair
+```
+
+Reads the failed-downloads database and re-attempts each item.  When an item is successfully downloaded during repair it is **automatically removed from the failed store**, so subsequent `rip repair` runs do not re-queue it.  Items that were already successfully downloaded (present in the downloads DB) are skipped.  Running `rip repair` multiple times is safe.
+
+#### Retry count and backoff (command line)
+
+```bash
+rip --retry 5 --retry-delay 3.0 url https://www.deezer.com/album/12345
+```
+
+The delay doubles between each attempt (`retry_backoff_factor`).  Both settings can also be set permanently in the `[reliability]` section of the config file.
+
+#### Fail-fast mode
+
+```bash
+rip --fail-fast url https://www.deezer.com/album/12345
+```
+
+The run stops after the first **media item** (track, album, playlist) that records a failure.  In practice this means: if the failing item is an album or playlist, all tracks within that item are still attempted before the run halts — fail-fast acts at media-item granularity, not at individual track granularity inside a collection.
+
+#### Disable FLAC validation
+
+```bash
+rip --no-validate-flac url https://www.deezer.com/album/12345
+```
+
+FLAC validation is **enabled by default**.  After each FLAC download, streamrip uses `mutagen` (already a dependency) to parse the file header and stream-info block.  **This catches obviously corrupt or truncated files where the header is unreadable, but it does not perform a full audio-frame decode.**  A file with valid headers but corrupted audio frames will pass this check.  If a file fails validation it is removed before being stored, and the failure is recorded for replay.
+
+For a stronger guarantee you can run `flac --test` on completed downloads manually, or after a `rip repair` session.  Pass `--no-validate-flac` to skip the check entirely.
+
+#### Reliability config reference
+
+All settings live in the `[reliability]` section of the config file (`rip config open`):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `retry_count` | `3` | Number of retries per download (0 = no retry) |
+| `retry_delay` | `2.0` | Initial delay in seconds before the first retry |
+| `retry_backoff_factor` | `2.0` | Multiplier applied to delay after each retry |
+| `fail_fast` | `false` | Stop immediately on first failure |
+| `validate_flac` | `true` | Verify FLAC integrity; remove and record corrupt files |
+
+#### Exit codes
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | All items succeeded (or were skipped as already downloaded) |
+| `1` | At least one item failed |
+
+This makes it straightforward to use streamrip in shell scripts or CI:
+
+```bash
+rip file urls.txt || notify_failure
 ```
 
 If you're confused about anything, see the help pages. The main help pages can be accessed by typing `rip` by itself in the command line. The help pages for each command can be accessed with the `--help` flag. For example, to see the help page for the `url` command, type

@@ -98,6 +98,9 @@ downloads_path = "downloadspath"
 # called to retry the downloads
 failed_downloads_enabled = true
 failed_downloads_path = "faileddownloadspath"
+# Path to a CSV file where failed downloads are logged with track details (title, artist, error)
+# Leave empty to use the default path in the app directory
+failed_downloads_log_path = "faileddownloadslogpath"
 
 # Convert tracks to a codec after downloading them.
 [conversion]
@@ -189,7 +192,14 @@ progress_bars = true
 # The maximum number of search results to show in the interactive menu
 max_search_results = 100
 
+[reliability]
+retry_count = 3
+retry_delay = 2.0
+retry_backoff_factor = 2.0
+fail_fast = false
+validate_flac = true
+
 [misc]
 # Metadata to identify this config file. Do not change.
-version = "2.2.0"
+version = "2.3.0"
 check_for_updates = true

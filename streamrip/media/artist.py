@@ -58,21 +58,27 @@ class Artist(Media):
         filtered_albums = self._apply_filters(resolved, filters)
         batches = self.batch([a.rip() for a in filtered_albums], RESOLVE_CHUNK_SIZE)
         for batch in batches:
-            await asyncio.gather(*batch)
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Error downloading album: %s", result)
 
     async def _download_async(self, filters: QobuzDiscographyFilterConfig):
         async def _rip(item: PendingAlbum):
-            album = await item.resolve()
-            # Skip if album doesn't pass the filter
-            if (
-                album is None
-                or (filters.extras and not self._extras(album))
-                or (filters.features and not self._features(album))
-                or (filters.non_studio_albums and not self._non_studio_albums(album))
-                or (filters.non_remaster and not self._non_remaster(album))
-            ):
-                return
-            await album.rip()
+            try:
+                album = await item.resolve()
+                # Skip if album doesn't pass the filter
+                if (
+                    album is None
+                    or (filters.extras and not self._extras(album))
+                    or (filters.features and not self._features(album))
+                    or (filters.non_studio_albums and not self._non_studio_albums(album))
+                    or (filters.non_remaster and not self._non_remaster(album))
+                ):
+                    return
+                await album.rip()
+            except Exception as e:
+                logger.error("Error processing album: %s", e)
 
         batches = self.batch(
             [_rip(album) for album in self.albums],

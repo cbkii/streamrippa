@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from functools import wraps
 from typing import Any
 
@@ -85,9 +86,45 @@ def coro(f):
     help="Enable verbose output (debug mode)",
     is_flag=True,
 )
+@click.option(
+    "--fail-fast",
+    help="Stop immediately when any item fails instead of continuing",
+    is_flag=True,
+    default=False,
+)
+@click.option(
+    "--retry",
+    "retry_count",
+    help="Number of times to retry a failed download (overrides config)",
+    type=click.IntRange(min=0),
+    default=None,
+)
+@click.option(
+    "--retry-delay",
+    help="Initial delay in seconds between retries (overrides config)",
+    type=float,
+    default=None,
+)
+@click.option(
+    "--validate-flac/--no-validate-flac",
+    help="Enable or disable FLAC integrity validation after download",
+    default=None,
+)
 @click.pass_context
 def rip(
-    ctx, config_path, folder, no_db, quality, codec, no_progress, no_ssl_verify, verbose
+    ctx,
+    config_path,
+    folder,
+    no_db,
+    quality,
+    codec,
+    no_progress,
+    no_ssl_verify,
+    verbose,
+    fail_fast,
+    retry_count,
+    retry_delay,
+    validate_flac,
 ):
     """Streamrip: the all in one music downloader."""
     global logger
@@ -161,6 +198,15 @@ def rip(
     if no_ssl_verify:
         c.session.downloads.verify_ssl = False
 
+    if fail_fast:
+        c.session.reliability.fail_fast = True
+    if retry_count is not None:
+        c.session.reliability.retry_count = retry_count
+    if retry_delay is not None:
+        c.session.reliability.retry_delay = retry_delay
+    if validate_flac is not None:
+        c.session.reliability.validate_flac = validate_flac
+
     ctx.obj["config"] = c
 
 
@@ -173,6 +219,7 @@ async def url(ctx, urls):
     if ctx.obj["config"] is None:
         return
 
+    failures = 0
     try:
         with ctx.obj["config"] as cfg:
             cfg: Config
@@ -190,7 +237,7 @@ async def url(ctx, urls):
             async with Main(cfg) as main:
                 await main.add_all(urls)
                 await main.resolve()
-                await main.rip()
+                failures = await main.rip()
 
             if version_coro is not None:
                 latest_version, notes = await version_coro
@@ -208,6 +255,10 @@ async def url(ctx, urls):
 
         console.print(f"[red]SSL Certificate verification error: {e}[/red]")
         print_ssl_error_help()
+        failures = 1
+
+    if failures > 0:
+        sys.exit(1)
 
 
 @rip.command()
@@ -225,6 +276,7 @@ async def file(ctx, path):
 
         rip file urls.txt
     """
+    failures = 0
     try:
         with ctx.obj["config"] as cfg:
             async with Main(cfg) as main:
@@ -256,12 +308,16 @@ async def file(ctx, path):
                     await main.add_all(items)
 
                 await main.resolve()
-                await main.rip()
+                failures = await main.rip()
     except aiohttp.ClientConnectorCertificateError as e:
         from ..utils.ssl_utils import print_ssl_error_help
 
         console.print(f"[red]SSL Certificate verification error: {e}[/red]")
         print_ssl_error_help()
+        failures = 1
+
+    if failures > 0:
+        sys.exit(1)
 
 
 @rip.group()
@@ -396,6 +452,7 @@ async def search(ctx, first, output_file, num_results, source, media_type, query
     if first and output_file:
         console.print("Cannot choose --first and --output-file!")
         return
+    failures = 0
     with ctx.obj["config"] as cfg:
         async with Main(cfg) as main:
             if first:
@@ -407,7 +464,10 @@ async def search(ctx, first, output_file, num_results, source, media_type, query
             else:
                 await main.search_interactive(source, media_type, query)
             await main.resolve()
-            await main.rip()
+            failures = await main.rip()
+
+    if failures > 0:
+        sys.exit(1)
 
 
 @rip.command()
@@ -427,10 +487,14 @@ async def lastfm(ctx, source, fallback_source, url):
         config.session.lastfm.source = source
     if fallback_source is not None:
         config.session.lastfm.fallback_source = fallback_source
+    failures = 0
     with config as cfg:
         async with Main(cfg) as main:
             await main.resolve_lastfm(url)
-            await main.rip()
+            failures = await main.rip()
+
+    if failures > 0:
+        sys.exit(1)
 
 
 @rip.command()
@@ -441,11 +505,55 @@ async def lastfm(ctx, source, fallback_source, url):
 @coro
 async def id(ctx, source, media_type, id):
     """Download an item by ID."""
+    failures = 0
     with ctx.obj["config"] as cfg:
         async with Main(cfg) as main:
             await main.add_by_id(source, media_type, id)
             await main.resolve()
-            await main.rip()
+            failures = await main.rip()
+
+    if failures > 0:
+        sys.exit(1)
+
+
+@rip.command()
+@click.pass_context
+@coro
+async def repair(ctx):
+    """Retry all previously failed downloads.
+
+    Reads the failed-downloads database and attempts to download each item
+    again. Items that were already successfully downloaded in a later run are
+    skipped automatically (they are present in the downloads database).
+
+    Example usage:
+
+        rip repair
+    """
+    cfg: Config | None = ctx.obj.get("config")
+    if cfg is None:
+        console.print("[red]No config loaded. Cannot run repair.[/red]")
+        return
+
+    failures = 0
+    with cfg as c:
+        async with Main(c) as main:
+            failed_items = main.database.get_failed_downloads()
+            if not failed_items:
+                console.print("[green]No failed downloads to retry.[/green]")
+                return
+
+            console.print(
+                f"Retrying [yellow]{len(failed_items)}[/yellow] previously failed download(s)…"
+            )
+            await main.add_all_by_id(
+                [(source, media_type, item_id) for source, media_type, item_id in failed_items]
+            )
+            await main.resolve()
+            failures = await main.rip()
+
+    if failures > 0:
+        sys.exit(1)
 
 
 async def latest_streamrip_version(verify_ssl: bool = True) -> tuple[str, str | None]:
