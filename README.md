@@ -1,6 +1,5 @@
 ![streamrip logo](https://github.com/cbkii/streamrippa/blob/dev/demo/logo.svg?raw=true)
 
-[![Downloads](https://pepy.tech/badge/streamrip)](https://pepy.tech/project/streamrip)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/python/black)
 
 A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
@@ -34,11 +33,28 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 
 First, ensure [Python](https://www.python.org/downloads/) (version 3.10 or greater) and [pip](https://pip.pypa.io/en/stable/installing/) are installed. Then install `ffmpeg`. You may choose not to install this, but some functionality will be limited.
 
+This fork is **not published to PyPI**. Install from the wheel (`.whl`) attached to the [latest GitHub Release](https://github.com/cbkii/streamrippa/releases/latest):
+
 ```bash
-pip3 install streamrip --upgrade
+# 1. Download the .whl file from the Releases page, then install it:
+pip3 install streamrip-<version>-py3-none-any.whl
 ```
 
-If you run into issues, try installing directly from the `dev` branch:
+Or install directly from the GitHub Release URL (replace `<version>` and the tag with the actual release values):
+
+```bash
+pip3 install https://github.com/cbkii/streamrippa/releases/download/v<version>/streamrip-<version>-py3-none-any.whl
+```
+
+### Updating
+
+To update to a newer release, download the new wheel from the [Releases page](https://github.com/cbkii/streamrippa/releases) and reinstall:
+
+```bash
+pip3 install --upgrade streamrip-<new-version>-py3-none-any.whl
+```
+
+If you run into issues, or want the absolute latest development build, install directly from the `dev` branch:
 
 ```bash
 pip3 install git+https://github.com/cbkii/streamrippa.git@dev
@@ -50,32 +66,7 @@ When you type
 rip
 ```
 
-it should show the main help page. If you have no idea what these mean, or are having other issues installing, check out the [detailed installation instructions](https://github.com/cbkii/streamrippa/wiki#detailed-installation-instructions).
-
-For Arch Linux users, an AUR package exists. Make sure to install required packages from the AUR before using `makepkg` or use an AUR helper to automatically resolve them.
-```
-git clone https://aur.archlinux.org/streamrip.git
-cd streamrip
-makepkg -si
-```
- or
- ```
-paru -S streamrip
-```
-
-Alternatively, for users of Homebrew, you can install streamrip through brew.
-```
-brew install streamrip
-```
-
-### Streamrip beta
-
-If you want to get access to the latest and greatest features without waiting for a new release, install
-from the `dev` branch with the following command
-
-```bash
-pip3 install git+https://github.com/cbkii/streamrippa.git@dev
-```
+it should show the main help page. If you have no idea what these mean, or are having other issues installing, check out the [detailed installation instructions](https://github.com/nathom/streamrip/wiki#detailed-installation-instructions).
 
 ## Example Usage
 
@@ -220,7 +211,7 @@ rip url --help
 
 ## Other information
 
-For more in-depth information about `streamrip`, see the help pages and the [wiki](https://github.com/cbkii/streamrippa/wiki/).
+For more in-depth information about `streamrip`, see the help pages and the [wiki](https://github.com/nathom/streamrip/wiki/).
 
 ## Contributions
 
@@ -246,7 +237,7 @@ Please document any functions or obscure lines of code.
 
 ### The Wiki
 
-To help out `streamrip` users that may be having trouble, consider contributing some information to the wiki.
+To help out `streamrip` users that may be having trouble, consider contributing some information to the [upstream wiki](https://github.com/nathom/streamrip/wiki).
 Nothing is too obvious and everything is appreciated.
 
 ## Acknowledgements
@@ -266,4 +257,4 @@ I will not be responsible for how **you** use `streamrip`. By using `streamrip`,
 
 ## Sponsorship
 
-Consider becoming a Github sponsor for me if you enjoy my open source software.
+Consider becoming a Github sponsor for [nathom](https://github.com/sponsors/nathom), the original author of `streamrip`, if you enjoy this open source software.
