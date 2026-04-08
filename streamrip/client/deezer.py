@@ -102,7 +102,7 @@ class DeezerClient(Client):
 
         # The Deezer API paginates playlist tracks (default page size is 25).
         # Fetch all pages so that large playlists are fully retrieved.
-        all_tracks: list = []
+        all_tracks: list[dict] = []
         limit = 100
         index = 0
         while True:
