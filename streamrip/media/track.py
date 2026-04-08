@@ -31,6 +31,25 @@ class Track(Media):
     download_path: str = ""
     is_single: bool = False
 
+    async def rip(self):
+        await self.preprocess()
+        # File-based deduplication: skip if the output file already exists on disk.
+        # This handles tracks downloaded externally or in prior sessions not captured
+        # in the downloads database.
+        if os.path.isfile(self.download_path):
+            logger.info(
+                "Track '%s' already exists at '%s', skipping.",
+                self.meta.title,
+                self.download_path,
+            )
+            if not self.db.downloaded(self.meta.info.id):
+                self.db.set_downloaded(self.meta.info.id)
+            if self.is_single:
+                remove_title(self.meta.title)
+            return
+        await self.download()
+        await self.postprocess()
+
     async def preprocess(self):
         self._set_download_path()
         os.makedirs(self.folder, exist_ok=True)
@@ -69,7 +88,12 @@ class Track(Media):
                         f"Persistent error downloading track '{self.meta.title}', skipping: {e}"
                     )
                     self.db.set_failed(
-                        self.downloadable.source, "track", self.meta.info.id
+                        self.downloadable.source,
+                        "track",
+                        self.meta.info.id,
+                        title=self.meta.title,
+                        artist=self.meta.artist,
+                        error=str(e),
                     )
 
     async def postprocess(self):

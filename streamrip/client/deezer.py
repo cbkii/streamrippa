@@ -98,12 +98,36 @@ class DeezerClient(Client):
         return album_metadata
 
     async def get_playlist(self, item_id: str) -> dict:
-        pl_metadata, pl_tracks = await asyncio.gather(
-            asyncio.to_thread(self.client.api.get_playlist, item_id),
-            asyncio.to_thread(self.client.api.get_playlist_tracks, item_id),
-        )
-        pl_metadata["tracks"] = pl_tracks["data"]
-        pl_metadata["track_total"] = len(pl_tracks["data"])
+        pl_metadata = await asyncio.to_thread(self.client.api.get_playlist, item_id)
+
+        # The Deezer API paginates playlist tracks (default page size is 25).
+        # Fetch all pages so that large playlists are fully retrieved.
+        all_tracks: list = []
+        limit = 100
+        index = 0
+        while True:
+            page = await asyncio.to_thread(
+                self.client.api.get_playlist_tracks,
+                item_id,
+                limit=limit,
+                index=index,
+            )
+            batch = page.get("data", [])
+            all_tracks.extend(batch)
+            total = page.get("total", len(all_tracks))
+            # Stop when we have all tracks or the API returned fewer than requested
+            if len(all_tracks) >= total or len(batch) < limit:
+                break
+            index += limit
+            logger.debug(
+                "Fetched %d/%d tracks for playlist %s",
+                len(all_tracks),
+                total,
+                item_id,
+            )
+
+        pl_metadata["tracks"] = all_tracks
+        pl_metadata["track_total"] = len(all_tracks)
         return pl_metadata
 
     async def get_artist(self, item_id: str) -> dict:

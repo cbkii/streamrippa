@@ -81,7 +81,14 @@ class PendingPlaylistTrack(Pending):
             )
         except NonStreamableError as e:
             logger.error(f"Error fetching download info for track {self.id}: {e}")
-            self.db.set_failed(self.client.source, "track", self.id)
+            self.db.set_failed(
+                self.client.source,
+                "track",
+                self.id,
+                title=meta.title,
+                artist=meta.artist,
+                error=str(e),
+            )
             return None
 
         return Track(
@@ -119,6 +126,8 @@ class Playlist(Media):
 
     async def download(self):
         track_resolve_chunk_size = 20
+        total = len(self.tracks)
+        completed = 0
 
         async def _resolve_download(item: PendingPlaylistTrack):
             try:
@@ -140,6 +149,14 @@ class Playlist(Media):
             for result in results:
                 if isinstance(result, Exception):
                     logger.error(f"Batch processing error: {result}")
+
+            completed += len(batch)
+            logger.info(
+                "%d/%d tracks processed in playlist '%s'",
+                completed,
+                total,
+                self.name,
+            )
 
     @staticmethod
     def batch(iterable, n=1):

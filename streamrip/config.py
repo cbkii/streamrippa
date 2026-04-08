@@ -101,6 +101,9 @@ class DatabaseConfig:
     downloads_path: str
     failed_downloads_enabled: bool
     failed_downloads_path: str
+    # Path to a CSV log of failed downloads (title, artist, error).
+    # Leave empty to use the default path in the app directory.
+    failed_downloads_log_path: str
 
 
 @dataclass(slots=True)
@@ -234,6 +237,7 @@ HOME = Path.home()
 DEFAULT_DOWNLOADS_FOLDER = os.path.join(HOME, "StreamripDownloads")
 DEFAULT_DOWNLOADS_DB_PATH = os.path.join(APP_DIR, "downloads.db")
 DEFAULT_FAILED_DOWNLOADS_DB_PATH = os.path.join(APP_DIR, "failed_downloads.db")
+DEFAULT_FAILED_DOWNLOADS_LOG_PATH = os.path.join(APP_DIR, "failed_downloads.csv")
 DEFAULT_YOUTUBE_VIDEO_DOWNLOADS_FOLDER = os.path.join(
     DEFAULT_DOWNLOADS_FOLDER,
     "YouTubeVideos",
@@ -425,6 +429,7 @@ def toml_set_user_defaults(toml: TOMLDocument):
     toml["downloads"]["folder"] = DEFAULT_DOWNLOADS_FOLDER  # type: ignore
     toml["database"]["downloads_path"] = DEFAULT_DOWNLOADS_DB_PATH  # type: ignore
     toml["database"]["failed_downloads_path"] = DEFAULT_FAILED_DOWNLOADS_DB_PATH  # type: ignore
+    toml["database"]["failed_downloads_log_path"] = DEFAULT_FAILED_DOWNLOADS_LOG_PATH  # type: ignore
     toml["youtube"]["video_downloads_folder"] = DEFAULT_YOUTUBE_VIDEO_DOWNLOADS_FOLDER  # type: ignore
 
 

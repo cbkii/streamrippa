@@ -238,6 +238,7 @@ def test_sample_config_data_fields(sample_config_data):
             downloads_path="downloadspath",
             failed_downloads_enabled=True,
             failed_downloads_path="faileddownloadspath",
+            failed_downloads_log_path="faileddownloadslogpath",
         ),
         conversion=ConversionConfig(
             enabled=False,

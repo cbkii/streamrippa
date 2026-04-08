@@ -7,7 +7,7 @@ import aiofiles
 
 from .. import db
 from ..client import Client, DeezerClient, QobuzClient, SoundcloudClient, TidalClient
-from ..config import Config
+from ..config import Config, DEFAULT_FAILED_DOWNLOADS_LOG_PATH
 from ..console import console
 from ..media import (
     Media,
@@ -65,10 +65,13 @@ class Main:
 
         if c.failed_downloads_enabled:
             failed_downloads_db = db.Failed(c.failed_downloads_path)
+            log_path = c.failed_downloads_log_path or DEFAULT_FAILED_DOWNLOADS_LOG_PATH
+            failed_log: db.FailedTrackLog | None = db.FailedTrackLog(log_path)
         else:
             failed_downloads_db = db.Dummy()
+            failed_log = None
 
-        self.database = db.Database(downloads_db, failed_downloads_db)
+        self.database = db.Database(downloads_db, failed_downloads_db, failed_log)
 
     async def add(self, url: str):
         """Add url as a pending item.
@@ -179,6 +182,13 @@ class Main:
             total_items = len(self.media)
             logger.info(
                 f"Download completed with {failed_items} failed items out of {total_items} total items."
+            )
+
+        failed_log = self.database.failed_log
+        if failed_log is not None and failed_log.has_entries:
+            console.print(
+                f"[yellow]Some tracks failed to download. "
+                f"Details logged to: [cyan]{failed_log.path}"
             )
 
     async def search_interactive(self, source: str, media_type: str, query: str):

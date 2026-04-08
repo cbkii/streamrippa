@@ -1,10 +1,12 @@
 """Wrapper over a database that stores item IDs."""
 
+import csv
 import logging
 import os
 import sqlite3
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Final
 
 logger = logging.getLogger("streamrip")
@@ -178,10 +180,58 @@ class Failed(DatabaseBase):
     }
 
 
+class FailedTrackLog:
+    """Human-readable CSV log for failed downloads.
+
+    Writes one row per failed track with timestamp, source, media type, ID,
+    title, artist, and the error message so users can audit and retry as needed.
+    """
+
+    FIELDNAMES = ["timestamp", "source", "media_type", "id", "title", "artist", "error"]
+
+    def __init__(self, path: str):
+        self.path = path
+        self._has_entries = False
+        if not os.path.exists(path):
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+                writer.writeheader()
+
+    def log(
+        self,
+        source: str,
+        media_type: str,
+        id: str,
+        title: str = "",
+        artist: str = "",
+        error: str = "",
+    ):
+        """Append a failed-download entry to the CSV log."""
+        self._has_entries = True
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "media_type": media_type,
+            "id": id,
+            "title": title,
+            "artist": artist,
+            "error": error,
+        }
+        with open(self.path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+            writer.writerow(row)
+
+    @property
+    def has_entries(self) -> bool:
+        """True if at least one entry was written in the current session."""
+        return self._has_entries
+
+
 @dataclass(slots=True)
 class Database:
     downloads: DatabaseInterface
     failed: DatabaseInterface
+    failed_log: FailedTrackLog | None = field(default=None)
 
     def downloaded(self, item_id: str) -> bool:
         return self.downloads.contains(id=item_id)
@@ -192,5 +242,17 @@ class Database:
     def get_failed_downloads(self) -> list[tuple[str, str, str]]:
         return self.failed.all()
 
-    def set_failed(self, source: str, media_type: str, id: str):
+    def set_failed(
+        self,
+        source: str,
+        media_type: str,
+        id: str,
+        title: str = "",
+        artist: str = "",
+        error: str = "",
+    ):
+        """Record a failed download in the SQLite database and, if configured,
+        append a row to the human-readable CSV log."""
         self.failed.add((source, media_type, id))
+        if self.failed_log is not None:
+            self.failed_log.log(source, media_type, id, title=title, artist=artist, error=error)
