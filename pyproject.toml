@@ -5,8 +5,8 @@ description = "A fast, all-in-one music downloader for Qobuz, Deezer, Tidal, and
 authors = ["nathom <nathanthomas707@gmail.com>"]
 license = "GPL-3.0-only"
 readme = "README.md"
-homepage = "https://github.com/nathom/streamrip"
-repository = "https://github.com/nathom/streamrip"
+homepage = "https://github.com/cbkii/streamrippa"
+repository = "https://github.com/cbkii/streamrippa"
 include = ["src/config.toml"]
 keywords = ["hi-res", "free", "music", "download"]
 classifiers = [
@@ -40,7 +40,7 @@ click-help-colors = "^0.9.2"
 certifi = { version = "^2025.1.31", optional = true }
 
 [tool.poetry.urls]
-"Bug Reports" = "https://github.com/nathom/streamrip/issues"
+"Bug Reports" = "https://github.com/cbkii/streamrippa/issues"
 
 [tool.poetry.dev-dependencies]
 types-click = "^7.1.2"

@@ -578,7 +578,7 @@ async def latest_streamrip_version(verify_ssl: bool = True) -> tuple[str, str | 
             return version, None
 
         async with s.get(
-            "https://api.github.com/repos/nathom/streamrip/releases/latest"
+            "https://api.github.com/repos/cbkii/streamrippa/releases/latest"
         ) as resp:
             json = await resp.json()
         notes = json["body"]
