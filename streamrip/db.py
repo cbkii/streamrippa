@@ -7,7 +7,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Final
+from typing import ClassVar, Final
 
 logger = logging.getLogger("streamrip")
 
@@ -211,7 +211,7 @@ class FailedTrackLog:
     title, artist, and the error message so users can audit and retry as needed.
     """
 
-    FIELDNAMES = ["timestamp", "source", "media_type", "id", "title", "artist", "error"]
+    FIELDNAMES: ClassVar[list[str]] = ["timestamp", "source", "media_type", "id", "title", "artist", "error"]
 
     def __init__(self, path: str):
         self.path = path

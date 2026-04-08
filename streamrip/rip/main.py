@@ -7,7 +7,7 @@ import aiofiles
 
 from .. import db
 from ..client import Client, DeezerClient, QobuzClient, SoundcloudClient, TidalClient
-from ..config import Config, DEFAULT_FAILED_DOWNLOADS_LOG_PATH
+from ..config import DEFAULT_FAILED_DOWNLOADS_LOG_PATH, Config
 from ..console import console
 from ..media import (
     Media,

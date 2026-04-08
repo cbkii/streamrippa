@@ -1,16 +1,13 @@
 """Tests for the reliability layer: retry, FLAC validation, rip repair,
 fail-fast, exit codes, and session summary/stats."""
 
-import asyncio
 import os
-import sys
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from streamrip.db import Database, Dummy, FailedTrackLog, SessionStats
-
 
 # ---------------------------------------------------------------------------
 # Helper factories
@@ -118,7 +115,7 @@ class TestDatabaseStats:
 
 
 # ---------------------------------------------------------------------------
-# Track.download() – retry with backoff
+# Track.download() - retry with backoff
 # ---------------------------------------------------------------------------
 
 
@@ -256,7 +253,7 @@ class TestTrackRetry:
 
 
 # ---------------------------------------------------------------------------
-# Track.postprocess() – FLAC validation
+# Track.postprocess() - FLAC validation
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +373,7 @@ class TestFlacValidation:
 
 
 # ---------------------------------------------------------------------------
-# Main.rip() – fail-fast mode
+# Main.rip() - fail-fast mode
 # ---------------------------------------------------------------------------
 
 
@@ -464,7 +461,7 @@ class TestFailFast:
 
 
 # ---------------------------------------------------------------------------
-# Main.rip() – return value / exit code semantics
+# Main.rip() - return value / exit code semantics
 # ---------------------------------------------------------------------------
 
 
@@ -548,7 +545,7 @@ class TestExitCodeSemantics:
 
 
 # ---------------------------------------------------------------------------
-# Main.resolve() – exception safety
+# Main.resolve() - exception safety
 # ---------------------------------------------------------------------------
 
 
@@ -588,7 +585,7 @@ class TestSafeResolve:
 
 
 # ---------------------------------------------------------------------------
-# rip repair – replay failed items
+# rip repair - replay failed items
 # ---------------------------------------------------------------------------
 
 
@@ -635,7 +632,6 @@ class TestRipRepair:
     @pytest.mark.asyncio
     async def test_repair_skips_already_downloaded(self):
         """Items already in the downloads DB should be skipped during repair."""
-        from streamrip.db import Downloads
         from streamrip.rip.main import Main
 
         config = MagicMock()
@@ -659,7 +655,7 @@ class TestRipRepair:
 
 
 # ---------------------------------------------------------------------------
-# Artist batch – exception isolation
+# Artist batch - exception isolation
 # ---------------------------------------------------------------------------
 
 
@@ -1072,8 +1068,9 @@ class TestRepairClearsRecoveredItems:
     @pytest.mark.asyncio
     async def test_postprocess_calls_clear_failed_on_success(self):
         """On a successful download, Track.postprocess() removes the item from failed store."""
-        from streamrip.db import Failed
         import tempfile as _tempfile
+
+        from streamrip.db import Failed
 
         meta = MagicMock()
         meta.title = "Repaired Song"

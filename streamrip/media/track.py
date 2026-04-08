@@ -176,7 +176,7 @@ class Track(Media):
         Raises if the file is corrupt or invalid so the track is treated as
         failed rather than being silently stored as a bad download.
         """
-        from mutagen.flac import FLAC as MutagenFLAC
+        from mutagen.flac import FLAC as MutagenFLAC  # noqa: N811
 
         try:
             MutagenFLAC(self.download_path)
