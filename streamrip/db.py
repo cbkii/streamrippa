@@ -57,7 +57,7 @@ class Dummy(DatabaseInterface):
     def add(self, *_):
         pass
 
-    def remove(self, *args, **kwargs):
+    def remove(self, *_, **__):
         pass
 
     def all(self):

@@ -785,15 +785,31 @@ class TestFailedDownloadDoesNotPostprocess:
         track.download_path = "/tmp/failing_song.flac"
         return track
 
-    def _sem_ctx(self):
-        """Return the standard semaphore + progress_callback patch context managers."""
-        return (
-            patch("streamrip.media.track.get_progress_callback"),
-            patch("streamrip.media.track.global_download_semaphore"),
-            patch("streamrip.media.track.Track._set_download_path"),
-            patch("os.path.isfile", return_value=False),
-            patch("os.makedirs"),
+    @staticmethod
+    def _rip_patches():
+        """Return the stack of patches needed to call track.rip() in tests.
+
+        Suppresses: progress callback, download semaphore, _set_download_path
+        (which reads config values we don't fully mock), os.path.isfile, and
+        os.makedirs so no filesystem side-effects occur.
+        """
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        mock_ctx = stack.enter_context(
+            patch("streamrip.media.track.get_progress_callback")
         )
+        mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+        sem = stack.enter_context(
+            patch("streamrip.media.track.global_download_semaphore")
+        )
+        sem.return_value.__aenter__ = AsyncMock(return_value=None)
+        sem.return_value.__aexit__ = AsyncMock(return_value=False)
+        stack.enter_context(patch("streamrip.media.track.Track._set_download_path"))
+        stack.enter_context(patch("os.path.isfile", return_value=False))
+        stack.enter_context(patch("os.makedirs"))
+        return stack
 
     @pytest.mark.asyncio
     async def test_failed_download_never_calls_postprocess(self):
@@ -808,15 +824,7 @@ class TestFailedDownloadDoesNotPostprocess:
 
         track.postprocess = _fake_postprocess
 
-        with patch("streamrip.media.track.get_progress_callback") as mock_ctx, \
-             patch("streamrip.media.track.global_download_semaphore") as sem, \
-             patch("streamrip.media.track.Track._set_download_path"), \
-             patch("os.path.isfile", return_value=False), \
-             patch("os.makedirs"):
-            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            sem.return_value.__aenter__ = AsyncMock(return_value=None)
-            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+        with self._rip_patches():
             await track.rip()
 
         assert postprocess_called == [], "postprocess must not be called after download failure"
@@ -827,15 +835,7 @@ class TestFailedDownloadDoesNotPostprocess:
         db = _make_db()
         track = self._make_failing_track(db)
 
-        with patch("streamrip.media.track.get_progress_callback") as mock_ctx, \
-             patch("streamrip.media.track.global_download_semaphore") as sem, \
-             patch("streamrip.media.track.Track._set_download_path"), \
-             patch("os.path.isfile", return_value=False), \
-             patch("os.makedirs"):
-            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            sem.return_value.__aenter__ = AsyncMock(return_value=None)
-            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+        with self._rip_patches():
             await track.rip()
 
         # set_downloaded increments succeeded; must be 0 for a failed download
@@ -851,15 +851,7 @@ class TestFailedDownloadDoesNotPostprocess:
         db = Database(downloads=Downloads(db_path), failed=Dummy())
         track = self._make_failing_track(db)
 
-        with patch("streamrip.media.track.get_progress_callback") as mock_ctx, \
-             patch("streamrip.media.track.global_download_semaphore") as sem, \
-             patch("streamrip.media.track.Track._set_download_path"), \
-             patch("os.path.isfile", return_value=False), \
-             patch("os.makedirs"):
-            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            sem.return_value.__aenter__ = AsyncMock(return_value=None)
-            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+        with self._rip_patches():
             await track.rip()
 
         assert db.stats.failed == 1
