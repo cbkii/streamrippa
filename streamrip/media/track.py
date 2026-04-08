@@ -145,11 +145,10 @@ class Track(Media):
         failed rather than being silently stored as a bad download.
         """
         from mutagen.flac import FLAC as MutagenFLAC
-        from mutagen.flac import FLACNoHeaderError
 
         try:
             MutagenFLAC(self.download_path)
-        except (FLACNoHeaderError, Exception) as e:
+        except Exception as e:
             logger.error(
                 "FLAC validation failed for '%s': %s — removing corrupt file.",
                 self.meta.title,
