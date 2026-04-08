@@ -170,7 +170,7 @@ class DeezerPrompter(CredentialPrompter):
     def _prompt_creds_and_set_session_config(self):
         console.print(
             "If you're not sure how to find the ARL cookie, see the instructions at ",
-            "[blue underline]https://github.com/cbkii/streamrippa/wiki/Finding-your-Deezer-ARL-Cookie",
+            "[blue underline]https://github.com/nathom/streamrip/wiki/Finding-your-Deezer-ARL-Cookie",
         )
         c = self.config.session.deezer
         c.arl = Prompt.ask("Enter your [bold]ARL")

@@ -59,7 +59,7 @@ class TidalConfig:
 @dataclass(slots=True)
 class DeezerConfig:
     # An authentication cookie that allows streamrip to use your Deezer account
-    # See https://github.com/cbkii/streamrippa/wiki/Finding-Your-Deezer-ARL-Cookie
+    # See https://github.com/nathom/streamrip/wiki/Finding-Your-Deezer-ARL-Cookie
     # for instructions on how to find this
     arl: str
     # 0, 1, or 2
@@ -181,7 +181,7 @@ class MetadataConfig:
     # position in the playlist instead of its position in its album
     renumber_playlist_tracks: bool
     # The following metadata tags won't be applied
-    # See https://github.com/cbkii/streamrippa/wiki/Metadata-Tag-Names for more info
+    # See https://github.com/nathom/streamrip/wiki/Metadata-Tag-Names for more info
     exclude: list[str]
 
 
