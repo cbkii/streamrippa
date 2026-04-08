@@ -1,6 +1,12 @@
 name: Release Assets
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 2.2.1). Leave blank to auto-increment patch by 0.0.1'
+        required: false
+        default: ''
   release:
     types: [published]
 
@@ -11,6 +17,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,10 +34,115 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
+      # ── Dispatch-only: compute new version ──────────────────────────────────
+      - name: Compute new version
+        if: github.event_name == 'workflow_dispatch'
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            CURRENT=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+            IFS='.' read -r maj min pat <<< "$CURRENT"
+            echo "version=${maj}.${min}.$((pat + 1))" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Dispatch-only: update version in all source files ───────────────────
+      - name: Update version in source files
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"${V}\"/" pyproject.toml
+          sed -i "s/__version__ = \".*\"/__version__ = \"${V}\"/" streamrip/__init__.py
+
+      # ── Dispatch-only: collect commits for release notes ────────────────────
+      - name: Build commit log
+        if: github.event_name == 'workflow_dispatch'
+        id: log
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            # No previous tag – limit to commits since fork from base repo
+            git remote add upstream https://github.com/nathom/streamrip.git 2>/dev/null || true
+            git fetch upstream --no-tags -q 2>/dev/null || true
+            FORK_POINT=$(git merge-base HEAD upstream/master 2>/dev/null \
+                         || git merge-base HEAD upstream/main 2>/dev/null \
+                         || echo "")
+            if [ -n "$FORK_POINT" ]; then
+              RANGE="${FORK_POINT}..HEAD"
+            else
+              RANGE="HEAD"
+            fi
+          fi
+          COMMITS=$(git log "$RANGE" --oneline --no-merges --format="- %s" 2>/dev/null || echo "- (no changes listed)")
+          {
+            echo "commits<<ENDOFLOG"
+            echo "$COMMITS"
+            echo "ENDOFLOG"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Dispatch-only: commit version bump, tag, and push ───────────────────
+      - name: Commit, tag, and push
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml streamrip/__init__.py
+          git commit -m "chore: bump version to ${V}"
+          git tag -a "v${V}" -m "Release v${V}"
+          git push origin HEAD --follow-tags
+
+      # ── Both triggers: build wheel + sdist ──────────────────────────────────
       - name: Build distributions
         run: poetry build
 
+      # ── Dispatch-only: discover built wheel filename ────────────────────────
+      - name: Discover wheel filename
+        if: github.event_name == 'workflow_dispatch'
+        id: wheel
+        run: |
+          WHL=$(ls dist/*.whl | head -1 | xargs basename)
+          echo "filename=$WHL" >> "$GITHUB_OUTPUT"
+
+      # ── Dispatch-only: create GitHub release with description ────────────────
+      - name: Create GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          body: |
+            ## 📦 streamrippa v${{ steps.ver.outputs.version }}
+
+            📖 **[README & full documentation](https://github.com/${{ github.repository }}/blob/main/README.md)**
+
+            ---
+
+            ### ⚡ Quick Install
+
+            ```bash
+            pip3 install https://github.com/${{ github.repository }}/releases/download/v${{ steps.ver.outputs.version }}/${{ steps.wheel.outputs.filename }}
+            ```
+
+            ### 🔄 Quick Upgrade
+
+            ```bash
+            pip3 install --upgrade https://github.com/${{ github.repository }}/releases/download/v${{ steps.ver.outputs.version }}/${{ steps.wheel.outputs.filename }}
+            ```
+
+            ---
+
+            ### 📝 Changes since last release
+
+            ${{ steps.log.outputs.commits }}
+          files: dist/*
+
+      # ── Published-release trigger: upload assets to the existing release ─────
       - name: Upload release assets
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
