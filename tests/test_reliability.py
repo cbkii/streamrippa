@@ -203,7 +203,9 @@ class TestTrackRetry:
 
     @pytest.mark.asyncio
     async def test_all_retries_exhausted_records_failure(self):
-        """If all retry attempts fail, the track is recorded as failed."""
+        """If all retry attempts fail, the track is recorded as failed and DownloadError is raised."""
+        from streamrip.exceptions import DownloadError
+
         downloadable = MagicMock()
         downloadable.source = "deezer"
         downloadable.extension = "flac"
@@ -218,7 +220,8 @@ class TestTrackRetry:
             with patch("streamrip.media.track.global_download_semaphore") as sem:
                 sem.return_value.__aenter__ = AsyncMock(return_value=None)
                 sem.return_value.__aexit__ = AsyncMock(return_value=False)
-                await track.download()
+                with pytest.raises(DownloadError):
+                    await track.download()
 
         # retry_count=2 means 3 total attempts (initial + 2 retries)
         assert downloadable.download.call_count == 3
@@ -227,7 +230,9 @@ class TestTrackRetry:
 
     @pytest.mark.asyncio
     async def test_zero_retries_records_failure_immediately(self):
-        """With retry_count=0, a single failure records the track as failed."""
+        """With retry_count=0, a single failure records the track as failed and raises DownloadError."""
+        from streamrip.exceptions import DownloadError
+
         downloadable = MagicMock()
         downloadable.source = "deezer"
         downloadable.extension = "flac"
@@ -242,7 +247,8 @@ class TestTrackRetry:
             with patch("streamrip.media.track.global_download_semaphore") as sem:
                 sem.return_value.__aenter__ = AsyncMock(return_value=None)
                 sem.return_value.__aexit__ = AsyncMock(return_value=False)
-                await track.download()
+                with pytest.raises(DownloadError):
+                    await track.download()
 
         assert downloadable.download.call_count == 1
         assert db.stats.retried == 0
@@ -734,3 +740,505 @@ class TestFailedTrackLog:
         assert "timestamp" in first_line
         assert "title" in first_line
         assert "error" in first_line
+
+
+# ---------------------------------------------------------------------------
+# Critical regression: failed download must not reach postprocess/set_downloaded
+# ---------------------------------------------------------------------------
+
+
+class TestFailedDownloadDoesNotPostprocess:
+    """Regression tests for the critical bug where Track.rip() would call
+    postprocess() and set_downloaded() even after download() recorded a failure."""
+
+    def _make_failing_track(self, db):
+        from streamrip.media.track import Track
+
+        meta = MagicMock()
+        meta.title = "Failing Song"
+        meta.tracknumber = 1
+        meta.artist = "Bad Artist"
+        meta.info.id = "fail_id"
+
+        config = MagicMock()
+        config.session.reliability.retry_count = 0
+        config.session.reliability.retry_delay = 0.0
+        config.session.reliability.retry_backoff_factor = 1.0
+        config.session.cli.progress_bars = False
+        config.session.conversion.enabled = False
+        config.session.reliability.validate_flac = False
+
+        downloadable = MagicMock()
+        downloadable.source = "deezer"
+        downloadable.extension = "flac"
+        downloadable.size = AsyncMock(return_value=1000)
+        downloadable.download = AsyncMock(side_effect=Exception("download failed"))
+
+        track = Track(
+            meta=meta,
+            downloadable=downloadable,
+            config=config,
+            folder="/tmp",
+            cover_path=None,
+            db=db,
+        )
+        track.download_path = "/tmp/failing_song.flac"
+        return track
+
+    def _sem_ctx(self):
+        """Return the standard semaphore + progress_callback patch context managers."""
+        return (
+            patch("streamrip.media.track.get_progress_callback"),
+            patch("streamrip.media.track.global_download_semaphore"),
+            patch("streamrip.media.track.Track._set_download_path"),
+            patch("os.path.isfile", return_value=False),
+            patch("os.makedirs"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_download_never_calls_postprocess(self):
+        """postprocess() must NOT be called when download() exhausts all retries."""
+        db = _make_db()
+        track = self._make_failing_track(db)
+
+        postprocess_called = []
+
+        async def _fake_postprocess():
+            postprocess_called.append(True)
+
+        track.postprocess = _fake_postprocess
+
+        with patch("streamrip.media.track.get_progress_callback") as mock_ctx, \
+             patch("streamrip.media.track.global_download_semaphore") as sem, \
+             patch("streamrip.media.track.Track._set_download_path"), \
+             patch("os.path.isfile", return_value=False), \
+             patch("os.makedirs"):
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            sem.return_value.__aenter__ = AsyncMock(return_value=None)
+            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+            await track.rip()
+
+        assert postprocess_called == [], "postprocess must not be called after download failure"
+
+    @pytest.mark.asyncio
+    async def test_failed_download_never_marks_set_downloaded(self):
+        """set_downloaded() must NOT be called when download() fails."""
+        db = _make_db()
+        track = self._make_failing_track(db)
+
+        with patch("streamrip.media.track.get_progress_callback") as mock_ctx, \
+             patch("streamrip.media.track.global_download_semaphore") as sem, \
+             patch("streamrip.media.track.Track._set_download_path"), \
+             patch("os.path.isfile", return_value=False), \
+             patch("os.makedirs"):
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            sem.return_value.__aenter__ = AsyncMock(return_value=None)
+            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+            await track.rip()
+
+        # set_downloaded increments succeeded; must be 0 for a failed download
+        assert db.stats.succeeded == 0, "set_downloaded() must not be called for a failed track"
+        assert db.stats.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_item_not_in_both_failed_and_downloaded(self, tmp_path):
+        """A failed item must never appear in succeeded stats."""
+        from streamrip.db import Downloads
+
+        db_path = str(tmp_path / "test_dl.db")
+        db = Database(downloads=Downloads(db_path), failed=Dummy())
+        track = self._make_failing_track(db)
+
+        with patch("streamrip.media.track.get_progress_callback") as mock_ctx, \
+             patch("streamrip.media.track.global_download_semaphore") as sem, \
+             patch("streamrip.media.track.Track._set_download_path"), \
+             patch("os.path.isfile", return_value=False), \
+             patch("os.makedirs"):
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            sem.return_value.__aenter__ = AsyncMock(return_value=None)
+            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+            await track.rip()
+
+        assert db.stats.failed == 1
+        assert db.stats.succeeded == 0
+        assert not db.downloaded("fail_id"), "failed item must NOT be in the downloads DB"
+
+
+# ---------------------------------------------------------------------------
+# Critical regression: size() errors are retried and counted
+# ---------------------------------------------------------------------------
+
+
+class TestSizeErrorInRetryLoop:
+    """Regression for size() being called outside the try block,
+    which meant size() exceptions bypassed retry and set_failed tracking."""
+
+    @pytest.mark.asyncio
+    async def test_size_error_is_retried_and_eventually_fails(self):
+        """An error from downloadable.size() should be treated as a transient failure,
+        retried, and finally recorded via set_failed rather than propagating raw."""
+        from streamrip.exceptions import DownloadError
+        from streamrip.media.track import Track
+
+        meta = MagicMock()
+        meta.title = "Size Error Track"
+        meta.tracknumber = 1
+        meta.artist = "Artist"
+        meta.info.id = "size_err_id"
+
+        config = MagicMock()
+        config.session.reliability.retry_count = 1
+        config.session.reliability.retry_delay = 0.0
+        config.session.reliability.retry_backoff_factor = 1.0
+        config.session.cli.progress_bars = False
+
+        downloadable = MagicMock()
+        downloadable.source = "deezer"
+        downloadable.extension = "flac"
+        # Both size() calls fail
+        downloadable.size = AsyncMock(side_effect=Exception("network timeout"))
+        downloadable.download = AsyncMock()
+
+        db = _make_db()
+        track = Track(
+            meta=meta,
+            downloadable=downloadable,
+            config=config,
+            folder="/tmp",
+            cover_path=None,
+            db=db,
+        )
+        track.download_path = "/tmp/track.flac"
+
+        with patch("streamrip.media.track.global_download_semaphore") as sem:
+            sem.return_value.__aenter__ = AsyncMock(return_value=None)
+            sem.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(DownloadError):
+                await track.download()
+
+        # size() called once per attempt: 2 total (initial + 1 retry)
+        assert downloadable.size.call_count == 2
+        # download() was never reached
+        assert downloadable.download.call_count == 0
+        # Failure must be recorded in the DB
+        assert db.stats.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_size_error_first_then_success(self):
+        """size() failure on first attempt, success on second — counted as retry."""
+        from streamrip.media.track import Track
+
+        meta = MagicMock()
+        meta.title = "Size Retry Track"
+        meta.tracknumber = 1
+        meta.artist = "Artist"
+        meta.info.id = "size_retry_id"
+
+        config = MagicMock()
+        config.session.reliability.retry_count = 2
+        config.session.reliability.retry_delay = 0.0
+        config.session.reliability.retry_backoff_factor = 1.0
+        config.session.cli.progress_bars = False
+
+        downloadable = MagicMock()
+        downloadable.source = "deezer"
+        downloadable.extension = "flac"
+        # Fail on first size(), succeed on second
+        downloadable.size = AsyncMock(side_effect=[Exception("network timeout"), 1000])
+        downloadable.download = AsyncMock()
+
+        db = _make_db()
+        track = Track(
+            meta=meta,
+            downloadable=downloadable,
+            config=config,
+            folder="/tmp",
+            cover_path=None,
+            db=db,
+        )
+        track.download_path = "/tmp/track.flac"
+
+        with patch("streamrip.media.track.get_progress_callback") as mock_ctx:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            with patch("streamrip.media.track.global_download_semaphore") as sem:
+                sem.return_value.__aenter__ = AsyncMock(return_value=None)
+                sem.return_value.__aexit__ = AsyncMock(return_value=False)
+                await track.download()
+
+        # size() fails on attempt 1, succeeds on attempt 2
+        assert downloadable.size.call_count == 2
+        # download() only called on the successful attempt
+        assert downloadable.download.call_count == 1
+        assert db.stats.failed == 0
+        assert db.stats.retried == 1
+
+
+# ---------------------------------------------------------------------------
+# Critical regression: Failed DB composite uniqueness
+# ---------------------------------------------------------------------------
+
+
+class TestFailedDbCompositeUniqueness:
+    """Regression for Failed.structure using id UNIQUE instead of
+    UNIQUE(source, media_type, id), which allowed cross-source collisions."""
+
+    def test_same_id_different_sources_both_stored(self, tmp_path):
+        """Two items with the same ID but different sources must both be stored."""
+        from streamrip.db import Failed
+
+        db_path = str(tmp_path / "failed.db")
+        failed = Failed(db_path)
+
+        failed.add(("deezer", "track", "shared_id"))
+        failed.add(("qobuz", "track", "shared_id"))
+
+        rows = failed.all()
+        assert len(rows) == 2, (
+            "Both (deezer, track, shared_id) and (qobuz, track, shared_id) must be stored"
+        )
+        sources = {row[0] for row in rows}
+        assert sources == {"deezer", "qobuz"}
+
+    def test_same_id_different_media_types_both_stored(self, tmp_path):
+        """Same ID, same source, but different media_type must both be stored."""
+        from streamrip.db import Failed
+
+        db_path = str(tmp_path / "failed.db")
+        failed = Failed(db_path)
+
+        failed.add(("deezer", "track", "123"))
+        failed.add(("deezer", "album", "123"))
+
+        rows = failed.all()
+        assert len(rows) == 2
+        types = {row[1] for row in rows}
+        assert types == {"track", "album"}
+
+    def test_exact_duplicate_stored_once(self, tmp_path):
+        """Exact (source, media_type, id) duplicate is silently ignored (idempotent)."""
+        from streamrip.db import Failed
+
+        db_path = str(tmp_path / "failed.db")
+        failed = Failed(db_path)
+
+        failed.add(("deezer", "track", "abc"))
+        failed.add(("deezer", "track", "abc"))  # duplicate
+
+        rows = failed.all()
+        assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Major regression: repair clears recovered items
+# ---------------------------------------------------------------------------
+
+
+class TestRepairClearsRecoveredItems:
+    """Regression for rip repair never removing items from failed store after success."""
+
+    def test_clear_failed_removes_entry(self, tmp_path):
+        """clear_failed() removes the item from the failed store."""
+        from streamrip.db import Failed
+
+        db_path = str(tmp_path / "failed.db")
+        failed_db = Failed(db_path)
+        database = Database(downloads=Dummy(), failed=failed_db)
+
+        database.set_failed("deezer", "track", "id1")
+        assert len(database.get_failed_downloads()) == 1
+
+        database.clear_failed("deezer", "track", "id1")
+        assert len(database.get_failed_downloads()) == 0
+
+    def test_clear_failed_only_removes_matching_composite_key(self, tmp_path):
+        """clear_failed() only removes the matching (source, media_type, id) row."""
+        from streamrip.db import Failed
+
+        db_path = str(tmp_path / "failed.db")
+        failed_db = Failed(db_path)
+        database = Database(downloads=Dummy(), failed=failed_db)
+
+        database.set_failed("deezer", "track", "id1")
+        database.set_failed("qobuz", "track", "id1")
+
+        database.clear_failed("deezer", "track", "id1")
+
+        rows = database.get_failed_downloads()
+        assert len(rows) == 1
+        assert rows[0][0] == "qobuz", "Only the deezer entry should have been removed"
+
+    def test_clear_failed_on_dummy_db_is_noop(self):
+        """clear_failed() on a Dummy-backed Database must not raise."""
+        database = _make_db()
+        database.set_failed("deezer", "track", "id1")
+        database.clear_failed("deezer", "track", "id1")  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_postprocess_calls_clear_failed_on_success(self):
+        """On a successful download, Track.postprocess() removes the item from failed store."""
+        from streamrip.db import Failed
+        import tempfile as _tempfile
+
+        meta = MagicMock()
+        meta.title = "Repaired Song"
+        meta.artist = "Artist"
+        meta.info.id = "repaired_id"
+
+        config = MagicMock()
+        config.session.reliability.validate_flac = False
+        config.session.conversion.enabled = False
+
+        downloadable = MagicMock()
+        downloadable.source = "deezer"
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "failed.db")
+            failed_db = Failed(db_path)
+            database = Database(downloads=Dummy(), failed=failed_db)
+
+            # Pre-populate: item was previously failed
+            database.set_failed("deezer", "track", "repaired_id")
+            assert len(database.get_failed_downloads()) == 1
+
+            from streamrip.media.track import Track
+
+            track = Track(
+                meta=meta,
+                downloadable=downloadable,
+                config=config,
+                folder=tmpdir,
+                cover_path=None,
+                db=database,
+                is_single=False,
+            )
+            track.download_path = os.path.join(tmpdir, "song.mp3")
+
+            # Patch tag_file; skip FLAC validation (not .flac extension)
+            with patch("streamrip.media.track.tag_file", new_callable=AsyncMock):
+                await track.postprocess()
+
+            # After successful postprocess, item should be gone from failed store
+            assert len(database.get_failed_downloads()) == 0
+            assert database.stats.succeeded == 1
+
+
+# ---------------------------------------------------------------------------
+# Major regression: resolve-stage failures are counted in stats
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStageFailuresCounted:
+    """PendingTrack/PendingAlbum/PendingPlaylist resolve failures must be
+    recorded via set_failed so they appear in session stats and repair queues."""
+
+    @pytest.mark.asyncio
+    async def test_pending_album_non_streamable_calls_set_failed(self):
+        """PendingAlbum.resolve(): NonStreamableError increments failed counter."""
+        from streamrip.exceptions import NonStreamableError
+        from streamrip.media.album import PendingAlbum
+
+        client = MagicMock()
+        client.source = "deezer"
+        client.get_metadata = AsyncMock(side_effect=NonStreamableError("not available"))
+
+        config = MagicMock()
+        db = _make_db()
+
+        pending = PendingAlbum(id="album123", client=client, config=config, db=db)
+        result = await pending.resolve()
+
+        assert result is None
+        assert db.stats.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_album_metadata_error_calls_set_failed(self):
+        """PendingAlbum.resolve(): metadata build exception increments failed counter."""
+        from streamrip.media.album import PendingAlbum
+
+        client = MagicMock()
+        client.source = "deezer"
+        client.get_metadata = AsyncMock(return_value={"some": "resp"})
+
+        config = MagicMock()
+        db = _make_db()
+
+        with patch(
+            "streamrip.media.album.AlbumMetadata.from_album_resp",
+            side_effect=Exception("parse error"),
+        ):
+            pending = PendingAlbum(id="album123", client=client, config=config, db=db)
+            result = await pending.resolve()
+
+        assert result is None
+        assert db.stats.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_track_non_streamable_calls_set_failed(self):
+        """PendingTrack.resolve(): NonStreamableError increments failed counter."""
+        from streamrip.exceptions import NonStreamableError
+        from streamrip.media.track import PendingTrack
+
+        client = MagicMock()
+        client.source = "deezer"
+        client.get_metadata = AsyncMock(side_effect=NonStreamableError("unavailable"))
+
+        db = _make_db()
+        pending = PendingTrack(
+            id="track123",
+            album=MagicMock(),
+            client=client,
+            config=MagicMock(),
+            folder="/tmp",
+            db=db,
+            cover_path=None,
+        )
+        result = await pending.resolve()
+
+        assert result is None
+        assert db.stats.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_playlist_non_streamable_calls_set_failed(self):
+        """PendingPlaylist.resolve(): NonStreamableError increments failed counter."""
+        from streamrip.exceptions import NonStreamableError
+        from streamrip.media.playlist import PendingPlaylist
+
+        client = MagicMock()
+        client.source = "deezer"
+        client.get_metadata = AsyncMock(side_effect=NonStreamableError("unavailable"))
+
+        db = _make_db()
+        pending = PendingPlaylist(id="pl123", client=client, config=MagicMock(), db=db)
+        result = await pending.resolve()
+
+        assert result is None
+        assert db.stats.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_playlist_track_non_streamable_calls_set_failed(self):
+        """PendingPlaylistTrack.resolve(): NonStreamableError increments failed counter."""
+        from streamrip.exceptions import NonStreamableError
+        from streamrip.media.playlist import PendingPlaylistTrack
+
+        client = MagicMock()
+        client.source = "deezer"
+        client.get_metadata = AsyncMock(side_effect=NonStreamableError("unavailable"))
+
+        db = _make_db()
+        pending = PendingPlaylistTrack(
+            id="pt123",
+            client=client,
+            config=MagicMock(),
+            folder="/tmp",
+            playlist_name="Test Playlist",
+            position=1,
+            db=db,
+        )
+        result = await pending.resolve()
+
+        assert result is None
+        assert db.stats.failed == 1

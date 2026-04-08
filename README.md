@@ -157,7 +157,7 @@ Run rip repair to retry failed downloads.
 rip repair
 ```
 
-Reads the failed-downloads database and re-attempts each item.  Items that have since been downloaded successfully are skipped automatically.
+Reads the failed-downloads database and re-attempts each item.  When an item is successfully downloaded during repair it is **automatically removed from the failed store**, so subsequent `rip repair` runs do not re-queue it.  Items that were already successfully downloaded (present in the downloads DB) are skipped.  Running `rip repair` multiple times is safe.
 
 #### Retry count and backoff (command line)
 
@@ -173,7 +173,7 @@ The delay doubles between each attempt (`retry_backoff_factor`).  Both settings 
 rip --fail-fast url https://www.deezer.com/album/12345
 ```
 
-The run stops immediately when the first failure is detected.
+The run stops after the first **media item** (track, album, playlist) that records a failure.  In practice this means: if the failing item is an album or playlist, all tracks within that item are still attempted before the run halts — fail-fast acts at media-item granularity, not at individual track granularity inside a collection.
 
 #### Disable FLAC validation
 
@@ -181,7 +181,9 @@ The run stops immediately when the first failure is detected.
 rip --no-validate-flac url https://www.deezer.com/album/12345
 ```
 
-FLAC integrity validation is **enabled by default**.  It uses `mutagen` (already a dependency) to detect truncated or corrupt files and removes them before they are permanently stored.  Pass `--no-validate-flac` to skip the check.
+FLAC validation is **enabled by default**.  After each FLAC download, streamrip uses `mutagen` (already a dependency) to parse the file header and stream-info block.  **This catches obviously corrupt or truncated files where the header is unreadable, but it does not perform a full audio-frame decode.**  A file with valid headers but corrupted audio frames will pass this check.  If a file fails validation it is removed before being stored, and the failure is recorded for replay.
+
+For a stronger guarantee you can run `flac --test` on completed downloads manually, or after a `rip repair` session.  Pass `--no-validate-flac` to skip the check entirely.
 
 #### Reliability config reference
 

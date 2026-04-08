@@ -57,7 +57,7 @@ class Dummy(DatabaseInterface):
     def add(self, *_):
         pass
 
-    def remove(self, *_):
+    def remove(self, *args, **kwargs):
         pass
 
     def all(self):
@@ -181,14 +181,27 @@ class Downloads(DatabaseBase):
 
 
 class Failed(DatabaseBase):
-    """A table that stores information about failed downloads."""
+    """A table that stores information about failed downloads.
+
+    The composite unique key ``(source, media_type, id)`` prevents false
+    collisions where different sources or media types share the same ID string.
+    """
 
     name = "failed_downloads"
     structure: Final[dict] = {
         "source": ["text"],
         "media_type": ["text"],
-        "id": ["text", "unique"],
+        "id": ["text"],
     }
+
+    def create(self):
+        """Create the failed_downloads table with a composite unique constraint."""
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                f"CREATE TABLE {self.name} "
+                "(source TEXT NOT NULL, media_type TEXT NOT NULL, id TEXT NOT NULL, "
+                "UNIQUE(source, media_type, id))"
+            )
 
 
 class FailedTrackLog:
@@ -281,3 +294,12 @@ class Database:
             self.stats.validation_failures += 1
         if self.failed_log is not None:
             self.failed_log.log(source, media_type, id, title=title, artist=artist, error=error)
+
+    def clear_failed(self, source: str, media_type: str, id: str):
+        """Remove an item from the failed store after it has been successfully recovered.
+
+        This keeps ``rip repair`` idempotent: once an item is successfully
+        downloaded it is removed from the failed store so it is not re-queued
+        on the next repair run.
+        """
+        self.failed.remove(source=source, media_type=media_type, id=id)

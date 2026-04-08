@@ -51,6 +51,7 @@ class PendingPlaylistTrack(Pending):
             resp = await self.client.get_metadata(self.id, "track")
         except NonStreamableError as e:
             logger.error(f"Could not stream track {self.id}: {e}")
+            self.db.set_failed(self.client.source, "track", self.id, error=str(e))
             return None
 
         album = AlbumMetadata.from_track_resp(resp, self.client.source)
@@ -180,12 +181,14 @@ class PendingPlaylist(Pending):
             logger.error(
                 f"Playlist {self.id} not available to stream on {self.client.source} ({e})",
             )
+            self.db.set_failed(self.client.source, "playlist", self.id, error=str(e))
             return None
 
         try:
             meta = PlaylistMetadata.from_resp(resp, self.client.source)
         except Exception as e:
             logger.error(f"Error creating playlist: {e}")
+            self.db.set_failed(self.client.source, "playlist", self.id, error=str(e))
             return None
         name = meta.name
         parent = self.config.session.downloads.folder
