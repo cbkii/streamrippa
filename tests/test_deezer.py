@@ -148,9 +148,9 @@ def test_deezer_fallback_actually_occurred(deezer_client):
 
     # Since we requested FLAC (quality=2) but it's not available,
     # we should have fallen back to the next available quality (1 = MP3_320)
-    assert downloadable.quality == 1, (
-        "Should have fallen back to MP3_320 when FLAC unavailable"
-    )
+    assert (
+        downloadable.quality == 1
+    ), "Should have fallen back to MP3_320 when FLAC unavailable"
     print("Fallback occurred: FLAC unavailable, fell back to MP3_320")
 
     # Verify the URL is actually accessible and working

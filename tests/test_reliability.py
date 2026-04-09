@@ -323,9 +323,9 @@ class TestFlacValidation:
                 with pytest.raises(ValueError, match="FLAC validation failed"):
                     await track.postprocess()
 
-            assert not os.path.exists(corrupt_path), (
-                "Corrupt file should have been removed"
-            )
+            assert not os.path.exists(
+                corrupt_path
+            ), "Corrupt file should have been removed"
             assert db.stats.failed == 1
             assert db.stats.validation_failures == 1
         finally:
@@ -349,9 +349,9 @@ class TestFlacValidation:
                 # Should NOT raise even though file is corrupt
                 await track.postprocess()
 
-            assert os.path.exists(corrupt_path), (
-                "File should NOT be removed when validation is disabled"
-            )
+            assert os.path.exists(
+                corrupt_path
+            ), "File should NOT be removed when validation is disabled"
             assert db.stats.validation_failures == 0
         finally:
             if os.path.exists(corrupt_path):
@@ -427,9 +427,9 @@ class TestFailFast:
             await main.rip()
 
         assert "item1" in call_order
-        assert "item2" not in call_order, (
-            "item2 should not be processed in fail-fast mode"
-        )
+        assert (
+            "item2" not in call_order
+        ), "item2 should not be processed in fail-fast mode"
 
     @pytest.mark.asyncio
     async def test_non_fail_fast_processes_all_items(self):
@@ -831,9 +831,9 @@ class TestFailedDownloadDoesNotPostprocess:
         with self._rip_patches():
             await track.rip()
 
-        assert postprocess_called == [], (
-            "postprocess must not be called after download failure"
-        )
+        assert (
+            postprocess_called == []
+        ), "postprocess must not be called after download failure"
 
     @pytest.mark.asyncio
     async def test_failed_download_never_marks_set_downloaded(self):
@@ -845,9 +845,9 @@ class TestFailedDownloadDoesNotPostprocess:
             await track.rip()
 
         # set_downloaded increments succeeded; must be 0 for a failed download
-        assert db.stats.succeeded == 0, (
-            "set_downloaded() must not be called for a failed track"
-        )
+        assert (
+            db.stats.succeeded == 0
+        ), "set_downloaded() must not be called for a failed track"
         assert db.stats.failed == 1
 
     @pytest.mark.asyncio
@@ -864,9 +864,9 @@ class TestFailedDownloadDoesNotPostprocess:
 
         assert db.stats.failed == 1
         assert db.stats.succeeded == 0
-        assert not db.downloaded("fail_id"), (
-            "failed item must NOT be in the downloads DB"
-        )
+        assert not db.downloaded(
+            "fail_id"
+        ), "failed item must NOT be in the downloads DB"
 
 
 # ---------------------------------------------------------------------------
@@ -999,9 +999,9 @@ class TestFailedDbCompositeUniqueness:
         failed.add(("qobuz", "track", "shared_id"))
 
         rows = failed.all()
-        assert len(rows) == 2, (
-            "Both (deezer, track, shared_id) and (qobuz, track, shared_id) must be stored"
-        )
+        assert (
+            len(rows) == 2
+        ), "Both (deezer, track, shared_id) and (qobuz, track, shared_id) must be stored"
         sources = {row[0] for row in rows}
         assert sources == {"deezer", "qobuz"}
 
