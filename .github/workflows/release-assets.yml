@@ -1,17 +1,23 @@
-name: Release Assets
+name: Release
 
 on:
+  push:
+    tags:
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 2.2.1). Leave blank to auto-increment patch by 0.0.1'
+        description: 'Release version (with or without leading v, e.g. 2026.04.09)'
         required: false
         default: ''
-  release:
-    types: [published]
+      prev_version:
+        description: 'Previous version override for changelog scope (optional)'
+        required: false
+        default: ''
 
 jobs:
-  build-and-upload:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,6 +26,45 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ── Derive TAG, VERSION, ARCHIVE ─────────────────────────────────────────
+      - name: Derive context
+        id: ctx
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+            V="${V#v}"   # strip optional leading v
+            TAG="v${V}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            V="${TAG#v}"
+          fi
+          ARCHIVE="streamrippa-${V}.tar.gz"
+          echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
+          echo "version=${V}"       >> "$GITHUB_OUTPUT"
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+
+      # ── Manual runs: create and push tag if it doesn't exist ─────────────────
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ steps.ctx.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+      # ── Validate VERSION file matches tag version ─────────────────────────────
+      - name: Validate VERSION
+        run: |
+          REPO_VERSION=$(cat VERSION)
+          if [ "${{ steps.ctx.outputs.version }}" != "$REPO_VERSION" ]; then
+            echo "::error::VERSION mismatch: tag=${{ steps.ctx.outputs.version }} VERSION file=$REPO_VERSION"
+            exit 1
+          fi
+
+      # ── Build wheel and sdist ─────────────────────────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -34,115 +79,118 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
-      # ── Dispatch-only: compute new version ──────────────────────────────────
-      - name: Compute new version
-        if: github.event_name == 'workflow_dispatch'
-        id: ver
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            CURRENT=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-            IFS='.' read -r maj min pat <<< "$CURRENT"
-            echo "version=${maj}.${min}.$((pat + 1))" >> "$GITHUB_OUTPUT"
-          fi
-
-      # ── Dispatch-only: update version in all source files ───────────────────
-      - name: Update version in source files
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          V="${{ steps.ver.outputs.version }}"
-          sed -i "s/^version = \".*\"/version = \"${V}\"/" pyproject.toml
-          sed -i "s/__version__ = \".*\"/__version__ = \"${V}\"/" streamrip/__init__.py
-
-      # ── Dispatch-only: collect commits for release notes ────────────────────
-      - name: Build commit log
-        if: github.event_name == 'workflow_dispatch'
-        id: log
-        run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            RANGE="${PREV_TAG}..HEAD"
-          else
-            # No previous tag – limit to commits since fork from base repo
-            git remote add upstream https://github.com/nathom/streamrip.git 2>/dev/null || true
-            git fetch upstream --no-tags -q 2>/dev/null || true
-            FORK_POINT=$(git merge-base HEAD upstream/master 2>/dev/null \
-                         || git merge-base HEAD upstream/main 2>/dev/null \
-                         || echo "")
-            if [ -n "$FORK_POINT" ]; then
-              RANGE="${FORK_POINT}..HEAD"
-            else
-              RANGE="HEAD"
-            fi
-          fi
-          COMMITS=$(git log "$RANGE" --oneline --no-merges --format="- %s" 2>/dev/null || echo "- (no changes listed)")
-          {
-            echo "commits<<ENDOFLOG"
-            echo "$COMMITS"
-            echo "ENDOFLOG"
-          } >> "$GITHUB_OUTPUT"
-
-      # ── Dispatch-only: commit version bump, tag, and push ───────────────────
-      - name: Commit, tag, and push
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          V="${{ steps.ver.outputs.version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml streamrip/__init__.py
-          git commit -m "chore: bump version to ${V}"
-          git tag -a "v${V}" -m "Release v${V}"
-          git push origin HEAD --follow-tags
-
-      # ── Both triggers: build wheel + sdist ──────────────────────────────────
       - name: Build distributions
         run: poetry build
 
-      # ── Dispatch-only: discover built wheel filename ────────────────────────
-      - name: Discover wheel filename
-        if: github.event_name == 'workflow_dispatch'
-        id: wheel
+      # ── Create source tarball ─────────────────────────────────────────────────
+      - name: Create tarball
         run: |
-          WHL=$(ls dist/*.whl | head -1 | xargs basename)
-          echo "filename=$WHL" >> "$GITHUB_OUTPUT"
+          ARCHIVE="${{ steps.ctx.outputs.archive }}"
+          tar -czf "$ARCHIVE" pyproject.toml VERSION README.md CHANGELOG.md streamrip/
 
-      # ── Dispatch-only: create GitHub release with description ────────────────
-      - name: Create GitHub release
-        if: github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: v${{ steps.ver.outputs.version }}
-          body: |
-            ## 📦 streamrippa v${{ steps.ver.outputs.version }}
+      # ── Create SHA256SUMS ──────────────────────────────────────────────────────
+      - name: Create SHA256SUMS
+        run: |
+          sha256sum dist/*.whl dist/*.tar.gz "${{ steps.ctx.outputs.archive }}" > SHA256SUMS
+          cat SHA256SUMS
 
-            📖 **[README & full documentation](https://github.com/${{ github.repository }}/blob/main/README.md)**
+      # ── Create release-metadata.json ──────────────────────────────────────────
+      - name: Create release-metadata.json
+        run: |
+          VERSION="${{ steps.ctx.outputs.version }}"
+          TAG="${{ steps.ctx.outputs.tag }}"
+          printf '{\n  "version": "%s",\n  "tag": "%s",\n  "repo": "%s",\n  "commit": "%s",\n  "built_at": "%s"\n}\n' \
+            "$VERSION" "$TAG" "${{ github.repository }}" "${{ github.sha }}" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > release-metadata.json
 
-            ---
+      # ── Determine previous version ────────────────────────────────────────────
+      - name: Determine previous version
+        id: prev
+        run: |
+          TAG="${{ steps.ctx.outputs.tag }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.prev_version }}" ]; then
+            PV="${{ github.event.inputs.prev_version }}"
+            PV="${PV#v}"
+            PREV_TAG="v${PV}"
+            PREV_VERSION="$PV"
+          else
+            PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1 || echo "")
+            PREV_VERSION="${PREV_TAG#v}"
+          fi
+          echo "prev_tag=${PREV_TAG}"         >> "$GITHUB_OUTPUT"
+          echo "prev_version=${PREV_VERSION}" >> "$GITHUB_OUTPUT"
 
-            ### ⚡ Quick Install
+      # ── Extract release notes from CHANGELOG.md ───────────────────────────────
+      - name: Extract release notes
+        run: |
+          VERSION="${{ steps.ctx.outputs.version }}"
+          PREV_VERSION="${{ steps.prev.outputs.prev_version }}"
+          TAG="${{ steps.ctx.outputs.tag }}"
 
-            ```bash
-            pip3 install https://github.com/${{ github.repository }}/releases/download/v${{ steps.ver.outputs.version }}/${{ steps.wheel.outputs.filename }}
-            ```
+          # For pre-release tags (e.g. v2026.04.09-beta), strip suffix for heading lookup
+          BASE_VERSION="${VERSION%%-*}"
+          PREV_BASE="${PREV_VERSION%%-*}"
 
-            ### 🔄 Quick Upgrade
+          echo "=== Debug: changelog extraction ==="
+          echo "Current tag:      ${TAG}"
+          echo "Current version:  ${VERSION}"
+          echo "Base version:     ${BASE_VERSION}"
+          echo "Prev tag:         ${{ steps.prev.outputs.prev_tag }}"
+          echo "Prev version:     ${PREV_VERSION}"
 
-            ```bash
-            pip3 install --upgrade https://github.com/${{ github.repository }}/releases/download/v${{ steps.ver.outputs.version }}/${{ steps.wheel.outputs.filename }}
-            ```
+          CURR_LINE=$(grep -n "^## \[${BASE_VERSION}\]" CHANGELOG.md | head -1 | cut -d: -f1)
+          echo "Current heading found at line: ${CURR_LINE:-(not found)}"
 
-            ---
+          if [ -n "$CURR_LINE" ]; then
+            if [ -n "$PREV_BASE" ]; then
+              PREV_LINE=$(grep -n "^## \[${PREV_BASE}\]" CHANGELOG.md | head -1 | cut -d: -f1)
+            else
+              PREV_LINE=""
+            fi
 
-            ### 📝 Changes since last release
+            if [ -n "$PREV_LINE" ]; then
+              sed -n "${CURR_LINE},$((PREV_LINE - 1))p" CHANGELOG.md > release-notes.md
+            else
+              sed -n "${CURR_LINE},\$p" CHANGELOG.md > release-notes.md
+            fi
 
-            ${{ steps.log.outputs.commits }}
-          files: dist/*
+            LINE_COUNT=$(wc -l < release-notes.md)
+            echo "Lines extracted:  ${LINE_COUNT}"
+          else
+            echo "WARNING: heading ## [${BASE_VERSION}] not found in CHANGELOG.md"
+          fi
 
-      # ── Published-release trigger: upload assets to the existing release ─────
-      - name: Upload release assets
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
+          # Fallback: link to CHANGELOG.md at the tag if extraction is empty
+          if [ ! -s release-notes.md ]; then
+            echo "Using fallback release notes (link to CHANGELOG.md)"
+            printf 'See [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md) for release notes.\n' \
+              "${{ github.repository }}" "${TAG}" > release-notes.md
+          fi
+
+          echo "=== release-notes.md ==="
+          cat release-notes.md
+
+      # ── Publish GitHub Release ────────────────────────────────────────────────
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ctx.outputs.tag }}"
+          gh release create "$TAG" \
+            --title "streamrippa ${TAG}" \
+            --notes-file release-notes.md \
+            dist/*.whl \
+            dist/*.tar.gz \
+            "${{ steps.ctx.outputs.archive }}" \
+            SHA256SUMS \
+            release-metadata.json
+
+      # ── Print release URL to logs and job summary ─────────────────────────────
+      - name: Print release URL
+        run: |
+          TAG="${{ steps.ctx.outputs.tag }}"
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          echo "Release URL: ${RELEASE_URL}"
+          printf '## 🚀 Release published\n\n**[%s](%s)**\n' "${TAG}" "${RELEASE_URL}" \
+            >> "$GITHUB_STEP_SUMMARY"
+

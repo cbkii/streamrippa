@@ -1,5 +1,7 @@
 ![streamrip logo](https://github.com/cbkii/streamrippa/blob/dev/demo/logo.svg?raw=true)
 
+[![Latest Release](https://img.shields.io/github/v/release/cbkii/streamrippa)](https://github.com/cbkii/streamrippa/releases/latest)
+[![Release](https://github.com/cbkii/streamrippa/actions/workflows/release-assets.yml/badge.svg)](https://github.com/cbkii/streamrippa/actions/workflows/release-assets.yml)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/python/black)
 
 A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
