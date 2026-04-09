@@ -268,7 +268,7 @@ class SearchResults:
         return cls(results)
 
     def summaries(self) -> list[str]:
-        return [f"{i+1}. {r.summarize()}" for i, r in enumerate(self.results)]
+        return [f"{i + 1}. {r.summarize()}" for i, r in enumerate(self.results)]
 
     def get_choices(self, inds: tuple[int, ...] | int):
         if isinstance(inds, int):

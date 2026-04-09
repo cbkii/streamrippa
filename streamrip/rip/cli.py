@@ -299,7 +299,7 @@ async def file(ctx, path):
                     s = set(items)
                     if len(s) < len(items):
                         console.print(
-                            f"Found [orange]{len(items)-len(s)}[/orange] repeated URLs!"
+                            f"Found [orange]{len(items) - len(s)}[/orange] repeated URLs!"
                         )
                         items = list(s)
                     console.print(
@@ -547,7 +547,10 @@ async def repair(ctx):
                 f"Retrying [yellow]{len(failed_items)}[/yellow] previously failed download(s)…"
             )
             await main.add_all_by_id(
-                [(source, media_type, item_id) for source, media_type, item_id in failed_items]
+                [
+                    (source, media_type, item_id)
+                    for source, media_type, item_id in failed_items
+                ]
             )
             await main.resolve()
             failures = await main.rip()

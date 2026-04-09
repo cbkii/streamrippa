@@ -269,7 +269,7 @@ class PendingLastfmPlaylist(Pending):
         pending_tracks = []
         for pos, (id, from_fallback) in enumerate(results, start=1):
             if id is None:
-                logger.warning(f"No results found for {titles_artists[pos-1]}")
+                logger.warning(f"No results found for {titles_artists[pos - 1]}")
                 continue
 
             if from_fallback:

@@ -176,7 +176,7 @@ class Track(Media):
         Raises if the file is corrupt or invalid so the track is treated as
         failed rather than being silently stored as a bad download.
         """
-        from mutagen.flac import FLAC as MutagenFLAC
+        from mutagen.flac import FLAC as MutagenFLAC  # noqa: N811
 
         try:
             MutagenFLAC(self.download_path)
@@ -199,7 +199,9 @@ class Track(Media):
                 error=f"FLAC validation failed: {e}",
                 is_validation_failure=True,
             )
-            raise ValueError(f"FLAC validation failed for '{self.meta.title}': {e}") from e
+            raise ValueError(
+                f"FLAC validation failed for '{self.meta.title}': {e}"
+            ) from e
 
     async def _convert(self):
         c = self.config.session.conversion

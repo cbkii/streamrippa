@@ -72,7 +72,9 @@ class Artist(Media):
                     album is None
                     or (filters.extras and not self._extras(album))
                     or (filters.features and not self._features(album))
-                    or (filters.non_studio_albums and not self._non_studio_albums(album))
+                    or (
+                        filters.non_studio_albums and not self._non_studio_albums(album)
+                    )
                     or (filters.non_remaster and not self._non_remaster(album))
                 ):
                     return

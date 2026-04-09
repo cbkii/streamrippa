@@ -47,8 +47,8 @@ async def fast_async_download(path, url, headers, callback):
     chunk_size: int = 2**17  # 131 KB
     counter = 0
     yield_every = 8  # 1 MB
-    with open(path, "wb") as file:  # noqa: ASYNC101
-        with requests.get(  # noqa: ASYNC100
+    with open(path, "wb") as file:
+        with requests.get(
             url,
             headers=headers,
             allow_redirects=True,
@@ -396,7 +396,7 @@ async def concat_audio_files(paths: list[str], out: str, ext: str, max_files_ope
     outpaths = [
         os.path.join(
             tempdir,
-            f"__streamrip_ffmpeg_{hash(paths[i*max_files_open])}.{ext}",
+            f"__streamrip_ffmpeg_{hash(paths[i * max_files_open])}.{ext}",
         )
         for i in range(num_batches)
     ]
