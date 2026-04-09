@@ -108,9 +108,9 @@ class DatabaseBase(DatabaseInterface):
         :rtype: bool
         """
         allowed_keys = set(self.structure.keys())
-        assert all(key in allowed_keys for key in items.keys()), (
-            f"Invalid key. Valid keys: {allowed_keys}"
-        )
+        assert all(
+            key in allowed_keys for key in items.keys()
+        ), f"Invalid key. Valid keys: {allowed_keys}"
 
         items = {k: str(v) for k, v in items.items()}
 

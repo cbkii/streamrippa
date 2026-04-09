@@ -69,7 +69,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff.lint]
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
 select = ["E4", "E7", "E9", "F", "I", "ASYNC", "N", "RUF", "ERA001"]
-ignore = ["ASYNC230", "ASYNC210", "ASYNC240"]
+ignore = ["ASYNC100", "ASYNC101"]
 
 # Allow fix for all enabled rules (when `--fix`) is provided.
 fixable = ["ALL"]
