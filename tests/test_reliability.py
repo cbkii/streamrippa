@@ -323,7 +323,9 @@ class TestFlacValidation:
                 with pytest.raises(ValueError, match="FLAC validation failed"):
                     await track.postprocess()
 
-            assert not os.path.exists(corrupt_path), "Corrupt file should have been removed"
+            assert not os.path.exists(corrupt_path), (
+                "Corrupt file should have been removed"
+            )
             assert db.stats.failed == 1
             assert db.stats.validation_failures == 1
         finally:
@@ -339,13 +341,17 @@ class TestFlacValidation:
             corrupt_path = f.name
 
         try:
-            track, db = self._make_track(validate_flac=False, download_path=corrupt_path)
+            track, db = self._make_track(
+                validate_flac=False, download_path=corrupt_path
+            )
 
             with patch("streamrip.media.track.tag_file", new_callable=AsyncMock):
                 # Should NOT raise even though file is corrupt
                 await track.postprocess()
 
-            assert os.path.exists(corrupt_path), "File should NOT be removed when validation is disabled"
+            assert os.path.exists(corrupt_path), (
+                "File should NOT be removed when validation is disabled"
+            )
             assert db.stats.validation_failures == 0
         finally:
             if os.path.exists(corrupt_path):
@@ -421,7 +427,9 @@ class TestFailFast:
             await main.rip()
 
         assert "item1" in call_order
-        assert "item2" not in call_order, "item2 should not be processed in fail-fast mode"
+        assert "item2" not in call_order, (
+            "item2 should not be processed in fail-fast mode"
+        )
 
     @pytest.mark.asyncio
     async def test_non_fail_fast_processes_all_items(self):
@@ -622,9 +630,7 @@ class TestRipRepair:
 
             # Verify add_all_by_id would be called with the right args
             main.add_all_by_id = AsyncMock()
-            await main.add_all_by_id(
-                [(s, mt, i) for s, mt, i in failed_items]
-            )
+            await main.add_all_by_id([(s, mt, i) for s, mt, i in failed_items])
             main.add_all_by_id.assert_called_once_with(
                 [("deezer", "track", "id1"), ("deezer", "track", "id2")]
             )
@@ -705,7 +711,9 @@ class TestFailedTrackLog:
     def test_csv_written_with_all_fields(self, tmp_path):
         log_path = str(tmp_path / "failures.csv")
         log = FailedTrackLog(log_path)
-        log.log("deezer", "track", "123", title="My Song", artist="John", error="timeout")
+        log.log(
+            "deezer", "track", "123", title="My Song", artist="John", error="timeout"
+        )
 
         with open(log_path) as f:
             content = f.read()
@@ -823,7 +831,9 @@ class TestFailedDownloadDoesNotPostprocess:
         with self._rip_patches():
             await track.rip()
 
-        assert postprocess_called == [], "postprocess must not be called after download failure"
+        assert postprocess_called == [], (
+            "postprocess must not be called after download failure"
+        )
 
     @pytest.mark.asyncio
     async def test_failed_download_never_marks_set_downloaded(self):
@@ -835,7 +845,9 @@ class TestFailedDownloadDoesNotPostprocess:
             await track.rip()
 
         # set_downloaded increments succeeded; must be 0 for a failed download
-        assert db.stats.succeeded == 0, "set_downloaded() must not be called for a failed track"
+        assert db.stats.succeeded == 0, (
+            "set_downloaded() must not be called for a failed track"
+        )
         assert db.stats.failed == 1
 
     @pytest.mark.asyncio
@@ -852,7 +864,9 @@ class TestFailedDownloadDoesNotPostprocess:
 
         assert db.stats.failed == 1
         assert db.stats.succeeded == 0
-        assert not db.downloaded("fail_id"), "failed item must NOT be in the downloads DB"
+        assert not db.downloaded("fail_id"), (
+            "failed item must NOT be in the downloads DB"
+        )
 
 
 # ---------------------------------------------------------------------------

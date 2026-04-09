@@ -199,7 +199,9 @@ class Track(Media):
                 error=f"FLAC validation failed: {e}",
                 is_validation_failure=True,
             )
-            raise ValueError(f"FLAC validation failed for '{self.meta.title}': {e}") from e
+            raise ValueError(
+                f"FLAC validation failed for '{self.meta.title}': {e}"
+            ) from e
 
     async def _convert(self):
         c = self.config.session.conversion

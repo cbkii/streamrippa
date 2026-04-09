@@ -108,9 +108,9 @@ class DatabaseBase(DatabaseInterface):
         :rtype: bool
         """
         allowed_keys = set(self.structure.keys())
-        assert all(
-            key in allowed_keys for key in items.keys()
-        ), f"Invalid key. Valid keys: {allowed_keys}"
+        assert all(key in allowed_keys for key in items.keys()), (
+            f"Invalid key. Valid keys: {allowed_keys}"
+        )
 
         items = {k: str(v) for k, v in items.items()}
 
@@ -211,7 +211,15 @@ class FailedTrackLog:
     title, artist, and the error message so users can audit and retry as needed.
     """
 
-    FIELDNAMES: ClassVar[list[str]] = ["timestamp", "source", "media_type", "id", "title", "artist", "error"]
+    FIELDNAMES: ClassVar[list[str]] = [
+        "timestamp",
+        "source",
+        "media_type",
+        "id",
+        "title",
+        "artist",
+        "error",
+    ]
 
     def __init__(self, path: str):
         self.path = path
@@ -293,7 +301,9 @@ class Database:
         if is_validation_failure:
             self.stats.validation_failures += 1
         if self.failed_log is not None:
-            self.failed_log.log(source, media_type, id, title=title, artist=artist, error=error)
+            self.failed_log.log(
+                source, media_type, id, title=title, artist=artist, error=error
+            )
 
     def clear_failed(self, source: str, media_type: str, id: str):
         """Remove an item from the failed store after it has been successfully recovered.

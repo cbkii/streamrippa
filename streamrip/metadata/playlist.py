@@ -57,7 +57,9 @@ class PlaylistMetadata:
                 track,
             )
             if meta is None:
-                logger.error(f"Track {i+1} in playlist {name} not available for stream")
+                logger.error(
+                    f"Track {i + 1} in playlist {name} not available for stream"
+                )
                 continue
             tracks.append(meta)
 

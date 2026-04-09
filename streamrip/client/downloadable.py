@@ -396,7 +396,7 @@ async def concat_audio_files(paths: list[str], out: str, ext: str, max_files_ope
     outpaths = [
         os.path.join(
             tempdir,
-            f"__streamrip_ffmpeg_{hash(paths[i*max_files_open])}.{ext}",
+            f"__streamrip_ffmpeg_{hash(paths[i * max_files_open])}.{ext}",
         )
         for i in range(num_batches)
     ]

@@ -195,9 +195,7 @@ class Main:
                     break
 
                 if self.database.stats.failed > failures_before:
-                    console.print(
-                        "[red]Fail-fast: stopping after first failure.[/red]"
-                    )
+                    console.print("[red]Fail-fast: stopping after first failure.[/red]")
                     break
         else:
             results = await asyncio.gather(
