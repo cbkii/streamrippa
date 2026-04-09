@@ -42,7 +42,7 @@ certifi = { version = "^2025.1.31", optional = true }
 [tool.poetry.urls]
 "Bug Reports" = "https://github.com/cbkii/streamrippa/issues"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 types-click = "^7.1.2"
 types-Pillow = "^8.3.1"
 ruff = "^0.1"
