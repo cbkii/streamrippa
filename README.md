@@ -31,19 +31,37 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 
 ## Installation
 
-First, ensure [Python](https://www.python.org/downloads/) (version 3.10 or greater) and [pip](https://pip.pypa.io/en/stable/installing/) are installed. Then install `ffmpeg`. You may choose not to install this, but some functionality will be limited.
+Ensure **Python 3.10+** is installed. `ffmpeg` is recommended; some features are limited without it.
 
-This fork is **not published to PyPI**. Install from the wheel (`.whl`) attached to the [latest GitHub Release](https://github.com/cbkii/streamrippa/releases/latest):
+This fork is **not published to PyPI**. Install it from the wheel (`.whl`) attached to the [latest GitHub Release](https://github.com/cbkii/streamrippa/releases/latest).
+
+### Debian / Raspberry Pi OS packages
 
 ```bash
-# 1. Download the .whl file from the Releases page, then install it:
-pip3 install streamrip-<version>-py3-none-any.whl
+sudo apt update
+sudo apt install -y python3-full python3-venv ffmpeg
 ```
 
-Or install directly from the GitHub Release URL (replace `<version>` and the tag with the actual release values):
+> On Debian, Ubuntu, and Raspberry Pi OS, installing with `pip3` into the system Python may fail with an `externally-managed-environment` error. A virtual environment avoids this.
 
 ```bash
-pip3 install https://github.com/cbkii/streamrippa/releases/download/v<version>/streamrip-<version>-py3-none-any.whl
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install /path/to/streamrip-<version>-py3-none-any.whl
+```
+
+Or install directly from the release URL:
+
+```bash
+python -m pip install "https://github.com/cbkii/streamrippa/releases/download/v<version>/streamrip-<version>-py3-none-any.whl"
+```
+
+### Verify
+
+```bash
+python -m pip show streamrip
+rip --help
 ```
 
 ### Updating
