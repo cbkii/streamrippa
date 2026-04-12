@@ -1,23 +1,79 @@
-__pycache__
-*.egg-info
-secrets.py
-dist
-build
-test.py
-/urls.txt
-*.flac
-/Downloads
-/StreamripDownloads
-*.mp3
-StreamripDownloads
-*.wav
-*.log
-*.mp4
-*.opus
-*.mkv
-*.aac
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
 *.pyc
+
+# Packaging / build outputs
+build/
+dist/
+*.egg-info/
+*.egg-*
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / lint / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
 *test.py
-/.mypy_cache
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors / OS clutter
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# Local config / secrets
+.env
+.env.*
+*.local
+secrets.py
+
+# Repo-local scratch / temp
+/tmp/
+*.fix
+*.tmp
+*.bak
+
+# Project-local helper files
+/urls.txt
 pyrightconfig.json
+
+# Downloaded / generated media and logs
+*.flac
+*.mp3
+*.wav
+*.opus
+*.m4a
+*.aac
+*.mp4
+*.mkv
+*.log
+/Downloads/
+/StreamripDownloads/
+StreamripDownloads/
+
+# Optional local databases / dumps
+*.sqlite3
+*.sqlite3-*
+*.db
+
+# Jupyter
+.ipynb_checkpoints/
