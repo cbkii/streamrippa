@@ -164,7 +164,20 @@ class DeezerClient(Client):
         item_id: str,
         quality: int = 2,
         is_retry: bool = False,
+        exact_quality: bool = False,
     ) -> DeezerDownloadable:
+        """Return a :class:`DeezerDownloadable` for *item_id* at *quality*.
+
+        Args:
+            item_id: Deezer track ID.
+            quality: Requested quality level (0=MP3_128, 1=MP3_320, 2=FLAC).
+            is_retry: Internal flag used during geo-location fallback retries.
+            exact_quality: When ``True`` the method raises
+                :class:`NonStreamableError` if the exact requested quality is
+                not available, regardless of ``lower_quality_if_not_available``
+                in the config.  Set to ``True`` in CSV / quality-fallback mode
+                so that the caller can try the next quality/service explicitly.
+        """
         if item_id is None:
             raise NonStreamableError(
                 "No item id provided. This can happen when searching for fallback songs.",
@@ -188,8 +201,8 @@ class DeezerClient(Client):
 
         # Check if requested quality is available
         if size_map[quality] == 0:
-            if self.config.lower_quality_if_not_available:
-                # Fallback to lower quality
+            if not exact_quality and self.config.lower_quality_if_not_available:
+                # Fallback to lower quality (default behaviour for non-CSV flows)
                 while size_map[quality] == 0 and quality > 0:
                     logger.warning(
                         "The requested quality %s is not available. Falling back to quality %s",
@@ -198,7 +211,7 @@ class DeezerClient(Client):
                     )
                     quality -= 1
             else:
-                # No fallback - raise error
+                # No fallback - raise error (exact_quality mode or fallback disabled)
                 raise NonStreamableError(
                     f"The requested quality {quality} is not available and fallback is disabled."
                 )

@@ -219,6 +219,72 @@ This makes it straightforward to use streamrip in shell scripts or CI:
 rip file urls.txt || notify_failure
 ```
 
+### Exportify CSV mode
+
+Download tracks from a Spotify playlist exported with [Exportify](https://exportify.net/).
+
+**Export your Spotify playlist** from Exportify (downloads a `.csv` file), then:
+
+```bash
+# Auto-detect mode (tries JSON, then Exportify CSV, then URL list)
+rip file Liked_Songs.csv
+
+# Explicit CSV mode
+rip file --list-mode exportify-csv Liked_Songs.csv
+
+# Override search sources (default: uses [lastfm].source / [lastfm].fallback_source from config)
+rip file --list-mode exportify-csv --source qobuz --fallback-source deezer Liked_Songs.csv
+rip file --list-mode exportify-csv --source deezer --fallback-source qobuz Liked_Songs.csv
+```
+
+**Supported `--list-mode` values:**
+
+| Value | Behaviour |
+|-------|-----------|
+| `auto` (default) | Tries JSON, then Exportify CSV header detection, then URL list |
+| `json` | Force JSON mode (list of `{"source", "media_type", "id"}`) |
+| `urls` | Force URL list mode (whitespace-separated service URLs) |
+| `exportify-csv` | Force Exportify CSV mode |
+
+**Service-first / quality-second fallback:**
+
+For each CSV row, streamrip:
+
+1. Searches both the primary and fallback services.
+2. Scores results deterministically (exact ISRC > title+artist > title+album > year > first).
+3. Tries the primary service first at its configured quality.
+4. Falls back to the fallback service at the same pass quality before stepping down.
+5. Only steps to a lower quality after **both** services have been tried at that pass.
+
+**Rerunning is safe** — tracks already in the download database or on disk are skipped automatically.
+
+**Unresolved tracks** (no match found on any service) are logged to a CSV file next to
+the input file (e.g. `Liked_Songs_unresolved.csv`) for audit. These are separate from
+provider-backed download failures tracked by `rip repair`.
+
+**Exportify column metadata mapping:**
+
+By default, Exportify CSV columns are mapped into the downloaded file's tags:
+
+| CSV Column | Tag |
+|-----------|-----|
+| `Genres` | `genre` (merged with provider genre, no duplicates) |
+| `Loudness` | `exportify_loudness` (custom tag) |
+| `Tempo` | `tempo` (custom tag) |
+
+Metadata mapping is **best-effort**: failures are logged but never block a download.
+
+Customise or disable the mapping in the config file (`rip config open`):
+
+```toml
+[metadata]
+# Disable all extra metadata mapping:
+exportify_tag_map = {}
+
+# Custom mapping:
+exportify_tag_map = { "Genres" = "genre", "Tempo" = "bpm", "Added At" = "spotify_added_at" }
+```
+
 If you're confused about anything, see the help pages. The main help pages can be accessed by typing `rip` by itself in the command line. The help pages for each command can be accessed with the `--help` flag. For example, to see the help page for the `url` command, type
 
 ```

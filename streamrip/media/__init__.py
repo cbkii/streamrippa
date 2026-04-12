@@ -1,6 +1,7 @@
 from .album import Album, PendingAlbum
 from .artist import Artist, PendingArtist
 from .artwork import remove_artwork_tempdirs
+from .csv_playlist import PendingCsvPlaylist, PendingCsvTrack, TrackCandidate
 from .label import Label, PendingLabel
 from .media import Media, Pending
 from .playlist import (
@@ -19,6 +20,8 @@ __all__ = [
     "Pending",
     "PendingAlbum",
     "PendingArtist",
+    "PendingCsvPlaylist",
+    "PendingCsvTrack",
     "PendingLabel",
     "PendingLastfmPlaylist",
     "PendingPlaylist",
@@ -27,5 +30,6 @@ __all__ = [
     "PendingTrack",
     "Playlist",
     "Track",
+    "TrackCandidate",
     "remove_artwork_tempdirs",
 ]

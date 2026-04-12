@@ -259,18 +259,105 @@ class FailedTrackLog:
         return self._has_entries
 
 
+class UnresolvedQueryLog:
+    """Human-readable CSV log for CSV rows that could not be resolved to a
+    provider track during Exportify CSV import.
+
+    These rows were not downloadable by any service/quality combination.
+    They are logged here for audit and future retry rather than stored in the
+    provider-backed failed-downloads DB (which requires a stable provider ID).
+    """
+
+    FIELDNAMES: ClassVar[list[str]] = [
+        "timestamp",
+        "track_name",
+        "artists",
+        "album",
+        "release_date",
+        "isrc",
+        "spotify_uri",
+        "primary_source",
+        "fallback_source",
+        "reason",
+        "row_index",
+    ]
+
+    def __init__(self, path: str):
+        self.path = path
+        self._has_entries = False
+        if not os.path.exists(path):
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+                writer.writeheader()
+
+    def log(
+        self,
+        track_name: str,
+        artists: str,
+        album: str,
+        release_date: str,
+        isrc: str,
+        spotify_uri: str,
+        primary_source: str,
+        fallback_source: str,
+        reason: str,
+        row_index: int,
+    ):
+        """Append an unresolved-query entry to the CSV log."""
+        self._has_entries = True
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "track_name": track_name,
+            "artists": artists,
+            "album": album,
+            "release_date": release_date,
+            "isrc": isrc,
+            "spotify_uri": spotify_uri,
+            "primary_source": primary_source,
+            "fallback_source": fallback_source,
+            "reason": reason,
+            "row_index": row_index,
+        }
+        with open(self.path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+            writer.writerow(row)
+
+    @property
+    def has_entries(self) -> bool:
+        """True if at least one entry was written in the current session."""
+        return self._has_entries
+
+
 @dataclass(slots=True)
 class Database:
     downloads: DatabaseInterface
     failed: DatabaseInterface
     failed_log: FailedTrackLog | None = field(default=None)
+    unresolved_log: UnresolvedQueryLog | None = field(default=None)
     stats: SessionStats = field(default_factory=SessionStats)
 
-    def downloaded(self, item_id: str) -> bool:
+    def downloaded(self, item_id: str, source: str | None = None) -> bool:
+        """Check whether an item has been downloaded.
+
+        When *source* is provided the check uses a source-prefixed key
+        (``"source:id"``) so that Deezer ID 123 and Qobuz ID 123 are kept
+        separate.  For backward compatibility a legacy plain-``id`` record
+        is also accepted as a hit.
+        """
+        if source:
+            source_key = f"{source}:{item_id}"
+            if self.downloads.contains(id=source_key):
+                return True
         return self.downloads.contains(id=item_id)
 
-    def set_downloaded(self, item_id: str):
-        self.downloads.add((item_id,))
+    def set_downloaded(self, item_id: str, source: str | None = None):
+        """Record that an item has been downloaded.
+
+        When *source* is provided the key written is ``"source:id"`` so
+        that different sources with colliding numeric IDs do not interfere.
+        """
+        key = f"{source}:{item_id}" if source else item_id
+        self.downloads.add((key,))
         self.stats.succeeded += 1
 
     def set_skipped(self):

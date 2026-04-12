@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 from functools import wraps
-from typing import Any
 
 import aiofiles
 import aiohttp
@@ -267,47 +266,124 @@ async def url(ctx, urls):
     required=True,
     type=click.Path(exists=True, readable=True, file_okay=True, dir_okay=False),
 )
+@click.option(
+    "--list-mode",
+    "list_mode",
+    type=click.Choice(["auto", "json", "urls", "exportify-csv"], case_sensitive=False),
+    default="auto",
+    help=(
+        "File list mode. 'auto' tries JSON, then Exportify CSV, then URL list. "
+        "'exportify-csv' requires --source."
+    ),
+    show_default=True,
+)
+@click.option(
+    "-s",
+    "--source",
+    "source",
+    default=None,
+    help=(
+        "Primary search source for Exportify CSV mode "
+        "(default: [lastfm].source from config)."
+    ),
+)
+@click.option(
+    "-fs",
+    "--fallback-source",
+    "fallback_source",
+    default=None,
+    help=(
+        "Fallback search source for Exportify CSV mode "
+        "(default: [lastfm].fallback_source from config)."
+    ),
+)
 @click.pass_context
 @coro
-async def file(ctx, path):
-    """Download content from URLs in a file.
+async def file(ctx, path, list_mode, source, fallback_source):
+    """Download content from a file of URLs or an Exportify CSV.
 
     Example usage:
 
         rip file urls.txt
+
+        rip file --list-mode exportify-csv Liked_Songs.csv
+
+        rip file --list-mode exportify-csv --source qobuz --fallback-source deezer Liked_Songs.csv
     """
+    import os as _os
+
     failures = 0
     try:
         with ctx.obj["config"] as cfg:
             async with Main(cfg) as main:
-                async with aiofiles.open(path, "r") as f:
+                # Resolve effective source / fallback for CSV mode
+                _source = source or cfg.session.lastfm.source
+                _fallback = (
+                    fallback_source
+                    if fallback_source is not None
+                    else cfg.session.lastfm.fallback_source
+                )
+
+                async with aiofiles.open(path, "r", encoding="utf-8-sig") as f:
                     content = await f.read()
+
+                # Determine mode
+                if list_mode == "auto":
+                    from ..file_lists import detect_file_mode
+
+                    effective_mode = detect_file_mode(content)
+                else:
+                    effective_mode = list_mode.lower()
+
+                if effective_mode == "json":
                     try:
-                        items: Any = json.loads(content)
-                        loaded = True
-                    except json.JSONDecodeError:
-                        items = content.split()
-                        loaded = False
-                if loaded:
+                        items = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        console.print(f"[red]Failed to parse JSON: {e}[/red]")
+                        return
                     console.print(
-                        f"Detected json file. Loading [yellow]{len(items)}[/yellow] items"
+                        f"Detected JSON file. Loading [yellow]{len(items)}[/yellow] items"
                     )
                     await main.add_all_by_id(
                         [(i["source"], i["media_type"], i["id"]) for i in items]
                     )
-                else:
-                    s = set(items)
-                    if len(s) < len(items):
-                        console.print(
-                            f"Found [orange]{len(items) - len(s)}[/orange] repeated URLs!"
-                        )
-                        items = list(s)
-                    console.print(
-                        f"Detected list of urls. Loading [yellow]{len(items)}[/yellow] items"
-                    )
-                    await main.add_all(items)
+                    await main.resolve()
 
-                await main.resolve()
+                elif effective_mode == "exportify-csv":
+                    from ..file_lists import parse_exportify_csv
+
+                    playlist_name, rows = parse_exportify_csv(path)
+                    if not rows:
+                        console.print("[red]No rows found in CSV file.[/red]")
+                        return
+
+                    # Unresolved log lives next to the CSV file
+                    stem = _os.path.splitext(path)[0]
+                    unresolved_log_path = f"{stem}_unresolved.csv"
+
+                    await main.resolve_csv(
+                        playlist_name=playlist_name,
+                        rows=rows,
+                        source=_source,
+                        fallback_source=_fallback,
+                        unresolved_log_path=unresolved_log_path,
+                    )
+
+                else:
+                    # URL list mode
+                    items_list = content.split()
+                    s = set(items_list)
+                    if len(s) < len(items_list):
+                        console.print(
+                            f"Found [orange]{len(items_list) - len(s)}[/orange] repeated URLs!"
+                        )
+                        items_list = list(s)
+                    console.print(
+                        f"Detected list of urls. Loading [yellow]{len(items_list)}[/yellow] items"
+                    )
+                    await main.add_all(items_list)
+                    await main.resolve()
+
                 failures = await main.rip()
     except aiohttp.ClientConnectorCertificateError as e:
         from ..utils.ssl_utils import print_ssl_error_help
@@ -553,6 +629,71 @@ async def repair(ctx):
                 ]
             )
             await main.resolve()
+            failures = await main.rip()
+
+    if failures > 0:
+        sys.exit(1)
+
+
+@rip.command("repair-csv")
+@click.argument(
+    "path",
+    required=True,
+    type=click.Path(exists=True, readable=True, file_okay=True, dir_okay=False),
+)
+@click.option(
+    "-s",
+    "--source",
+    "source",
+    default=None,
+    help=("Primary search source for repair (default: [lastfm].source from config)."),
+)
+@click.option(
+    "-fs",
+    "--fallback-source",
+    "fallback_source",
+    default=None,
+    help=(
+        "Fallback search source for repair "
+        "(default: [lastfm].fallback_source from config)."
+    ),
+)
+@click.pass_context
+@coro
+async def repair_csv(ctx, path, source, fallback_source):
+    """Retry unresolved rows from a previous Exportify CSV import.
+
+    Reads the ``*_unresolved.csv`` log produced by a prior ``rip file``
+    Exportify CSV run and attempts to resolve each row again using:
+
+    \\b
+    - an expanded search window (3x normal),
+    - fuzzy title matching as a fallback when exact matching fails.
+
+    Rows that still cannot be resolved are written to a new
+    ``<stem>_repair_unresolved.csv`` file for further audit.
+
+    Example usage:
+
+        rip repair-csv Liked_Songs_unresolved.csv
+
+        rip repair-csv --source qobuz --fallback-source deezer Liked_Songs_unresolved.csv
+    """
+    cfg: Config | None = ctx.obj.get("config")
+    if cfg is None:
+        console.print("[red]No config loaded. Cannot run repair-csv.[/red]")
+        return
+
+    failures = 0
+    with cfg as c:
+        _source = source or c.session.lastfm.source
+        _fallback_source = fallback_source or c.session.lastfm.fallback_source or ""
+        async with Main(c) as main:
+            await main.repair_csv(
+                unresolved_csv_path=path,
+                source=_source,
+                fallback_source=_fallback_source,
+            )
             failures = await main.rip()
 
     if failures > 0:

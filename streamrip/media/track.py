@@ -42,8 +42,9 @@ class Track(Media):
                 self.meta.title,
                 self.download_path,
             )
-            if not self.db.downloaded(self.meta.info.id):
-                self.db.set_downloaded(self.meta.info.id)
+            src = getattr(self.downloadable, "source", None)
+            if not self.db.downloaded(self.meta.info.id, source=src):
+                self.db.set_downloaded(self.meta.info.id, source=src)
             else:
                 self.db.set_skipped()
             if self.is_single:
@@ -168,7 +169,7 @@ class Track(Media):
 
         # Clear from failed store if this item had previously failed (repair flow).
         self.db.clear_failed(self.downloadable.source, "track", self.meta.info.id)
-        self.db.set_downloaded(self.meta.info.id)
+        self.db.set_downloaded(self.meta.info.id, source=self.downloadable.source)
 
     async def _validate_flac(self):
         """Verify FLAC file integrity using mutagen.

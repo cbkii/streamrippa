@@ -14,6 +14,7 @@ from ..media import (
     Pending,
     PendingAlbum,
     PendingArtist,
+    PendingCsvPlaylist,
     PendingLabel,
     PendingLastfmPlaylist,
     PendingPlaylist,
@@ -72,6 +73,10 @@ class Main:
             failed_log = None
 
         self.database = db.Database(downloads_db, failed_downloads_db, failed_log)
+
+    def _enable_unresolved_log(self, path: str) -> None:
+        """Attach an :class:`~streamrip.db.UnresolvedQueryLog` to the database."""
+        self.database.unresolved_log = db.UnresolvedQueryLog(path)
 
     async def add(self, url: str):
         """Add url as a pending item.
@@ -344,6 +349,110 @@ class Main:
 
         if playlist is not None:
             self.media.append(playlist)
+
+    async def resolve_csv(
+        self,
+        playlist_name: str,
+        rows: list,
+        source: str,
+        fallback_source: str,
+        unresolved_log_path: str | None = None,
+        repair_mode: bool = False,
+    ) -> None:
+        """Resolve an Exportify CSV row list into a downloadable playlist.
+
+        Args:
+            playlist_name: Name derived from the CSV filename stem.
+            rows: Parsed :class:`~streamrip.rip.file_lists.ExportifyCsvRow` list.
+            source: Primary search source (e.g. ``"qobuz"``).
+            fallback_source: Fallback search source; empty string disables fallback.
+            unresolved_log_path: Optional path for the unresolved-query CSV log.
+            repair_mode: When ``True``, uses expanded search window and fuzzy
+                matching (:class:`~streamrip.media.csv_playlist.PendingCsvPlaylist`
+                ``repair_mode=True``) to recover rows left unresolved on the main
+                import path.
+        """
+        if unresolved_log_path:
+            self._enable_unresolved_log(unresolved_log_path)
+
+        primary_client = await self.get_logged_in_client(source)
+        fallback_client: Client | None = None
+        if fallback_source:
+            fallback_client = await self.get_logged_in_client(fallback_source)
+
+        pending_playlist = PendingCsvPlaylist(
+            playlist_name=playlist_name,
+            rows=rows,
+            primary_client=primary_client,
+            fallback_client=fallback_client,
+            config=self.config,
+            db=self.database,
+            repair_mode=repair_mode,
+        )
+
+        mode_label = "[bold yellow](repair mode)[/bold yellow] " if repair_mode else ""
+        console.print(
+            f"{mode_label}Resolving [yellow]{len(rows)}[/yellow] tracks from "
+            f"[cyan]{playlist_name}[/cyan] using [green]{source}[/green]"
+            + (f" / [blue]{fallback_source}[/blue]" if fallback_source else "")
+        )
+
+        playlist = await pending_playlist.resolve()
+        if playlist is not None:
+            self.media.append(playlist)
+
+        if self.database.unresolved_log and self.database.unresolved_log.has_entries:
+            console.print(
+                f"[yellow]Unresolved CSV tracks logged to: "
+                f"[cyan]{self.database.unresolved_log.path}"
+            )
+
+    async def repair_csv(
+        self,
+        unresolved_csv_path: str,
+        source: str,
+        fallback_source: str,
+    ) -> None:
+        """Replay unresolved CSV rows from a previous import using repair-mode matching.
+
+        Reads the ``*_unresolved.csv`` log written by a prior Exportify CSV
+        import, re-runs the resolution with:
+        - expanded search window (:data:`~streamrip.media.csv_playlist._REPAIR_SEARCH_LIMIT`)
+        - fuzzy title scoring (:func:`~streamrip.file_lists.score_candidate_repair`)
+
+        A new unresolved log is written to ``<stem>_repair_unresolved.csv``
+        alongside the input file so multiple repair passes are idempotent and
+        independently auditable.
+
+        Args:
+            unresolved_csv_path: Path to the ``*_unresolved.csv`` log file.
+            source: Primary search source (e.g. ``"qobuz"``).
+            fallback_source: Fallback search source; empty string disables fallback.
+        """
+        import os as _os
+
+        from ..file_lists import parse_unresolved_csv
+
+        rows = parse_unresolved_csv(unresolved_csv_path)
+        if not rows:
+            console.print(
+                "[yellow]No unresolved rows found in log — nothing to repair.[/yellow]"
+            )
+            return
+
+        stem = _os.path.splitext(unresolved_csv_path)[0]
+        repair_unresolved_path = f"{stem}_repair_unresolved.csv"
+
+        playlist_name = _os.path.basename(stem)
+
+        await self.resolve_csv(
+            playlist_name=playlist_name,
+            rows=rows,
+            source=source,
+            fallback_source=fallback_source,
+            unresolved_log_path=repair_unresolved_path,
+            repair_mode=True,
+        )
 
     async def __aenter__(self):
         return self
