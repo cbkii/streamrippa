@@ -100,10 +100,13 @@ def _make_candidate(
     )
 
 
-def _make_config(primary_quality: int = 2, fallback_quality: int = 3):
+def _make_config(
+    primary_quality: int = 2, fallback_quality: int = 3, fail_fast: bool = False
+):
     cfg = MagicMock()
     cfg.session.downloads.folder = "/tmp/test_downloads"
     cfg.session.cli.progress_bars = False
+    cfg.session.reliability.fail_fast = fail_fast
     cfg.session.metadata.renumber_playlist_tracks = False
     cfg.session.metadata.set_playlist_to_album = False
     cfg.session.metadata.exportify_tag_map = {}
@@ -190,8 +193,20 @@ def test_pick_best_candidate_isrc_wins():
     pages = [
         {
             "data": [
-                {"id": 1, "title": "Wrong Song", "artist": {"name": "X"}, "isrc": "ISRC001", "album": {"title": ""}},
-                {"id": 2, "title": "Song", "artist": {"name": "Artist"}, "isrc": "OTHER", "album": {"title": "Album"}},
+                {
+                    "id": 1,
+                    "title": "Wrong Song",
+                    "artist": {"name": "X"},
+                    "isrc": "ISRC001",
+                    "album": {"title": ""},
+                },
+                {
+                    "id": 2,
+                    "title": "Song",
+                    "artist": {"name": "Artist"},
+                    "isrc": "OTHER",
+                    "album": {"title": "Album"},
+                },
             ]
         }
     ]
@@ -347,7 +362,9 @@ async def test_pending_csv_track_all_passes_fail_returns_none():
         db=db,
     )
 
-    with patch.object(track, "_try_candidate", new_callable=AsyncMock, return_value=None):
+    with patch.object(
+        track, "_try_candidate", new_callable=AsyncMock, return_value=None
+    ):
         result = await track.resolve()
 
     assert result is None
@@ -374,6 +391,134 @@ async def test_pending_csv_track_no_candidates_returns_none():
     )
     result = await track.resolve()
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_track_skips_if_primary_already_downloaded():
+    """When the primary candidate is already in the DB, the whole track must be
+    skipped — the fallback must NOT be attempted."""
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    fallback_client = _make_client("deezer")
+
+    primary_cand = _make_candidate("qobuz", primary_client, id="qobuz_id")
+    fallback_cand = _make_candidate("deezer", fallback_client, id="deezer_id")
+
+    # Mark the primary as already downloaded (source-aware key)
+    db.downloads.add(("qobuz:qobuz_id",))
+
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=primary_cand,
+        fallback_candidate=fallback_cand,
+        primary_qualities=[2, 1, 0],
+        fallback_qualities=[2, 1, 0],
+        primary_source="qobuz",
+        fallback_source="deezer",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+
+    with patch.object(track, "_try_candidate", new_callable=AsyncMock) as mock_try:
+        result = await track.resolve()
+
+    # Must skip entirely — fallback must not be attempted
+    assert result is None
+    mock_try.assert_not_called()
+    assert db.stats.skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_track_skips_if_fallback_already_downloaded():
+    """When the fallback candidate is already in the DB, the whole track must
+    be skipped — even if the primary was never downloaded."""
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    fallback_client = _make_client("deezer")
+
+    primary_cand = _make_candidate("qobuz", primary_client, id="qobuz_id")
+    fallback_cand = _make_candidate("deezer", fallback_client, id="deezer_id")
+
+    # Mark only the fallback as already downloaded
+    db.downloads.add(("deezer:deezer_id",))
+
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=primary_cand,
+        fallback_candidate=fallback_cand,
+        primary_qualities=[2, 1, 0],
+        fallback_qualities=[2, 1, 0],
+        primary_source="qobuz",
+        fallback_source="deezer",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+
+    with patch.object(track, "_try_candidate", new_callable=AsyncMock) as mock_try:
+        result = await track.resolve()
+
+    assert result is None
+    mock_try.assert_not_called()
+    assert db.stats.skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_fail_fast_stops_after_batch_error():
+    """With fail_fast=True, a batch-level exception stops further batch processing.
+
+    Per-row search failures are caught inside _resolve_row (normal behaviour).
+    Only an unexpected exception that propagates OUT of _resolve_row triggers
+    the fail_fast stop.  This test patches _resolve_row directly to simulate
+    that scenario.
+    """
+    import streamrip.media.csv_playlist as csv_mod
+
+    original_batch_size = csv_mod._RESOLVER_BATCH_SIZE
+    csv_mod._RESOLVER_BATCH_SIZE = 1  # one row per batch
+
+    try:
+        db = _make_db()
+        cfg = _make_config(fail_fast=True)
+        primary_client = _make_client("qobuz")
+        primary_client.search = AsyncMock(return_value=[])
+
+        rows = [_make_row(row_index=i) for i in range(5)]
+
+        pending = PendingCsvPlaylist(
+            playlist_name="Test",
+            rows=rows,
+            primary_client=primary_client,
+            fallback_client=None,
+            config=cfg,
+            db=db,
+        )
+
+        call_count = [0]
+        original_resolve_row = pending._resolve_row
+
+        async def _patched_resolve_row(row, folder, pq, fq, status, cb):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Unexpected resolver failure")
+            return await original_resolve_row(row, folder, pq, fq, status, cb)
+
+        with patch.object(pending, "_resolve_row", side_effect=_patched_resolve_row):
+            await pending.resolve()
+
+        # With fail_fast=True and batch_size=1, the first batch raises → stops after 1.
+        # Without fail_fast all 5 batches would run.
+        assert call_count[0] == 1
+
+    finally:
+        csv_mod._RESOLVER_BATCH_SIZE = original_batch_size
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +559,9 @@ async def test_pending_csv_playlist_batches_resolver():
             gather_calls.append(len(coros))
             return await original_gather(*coros, return_exceptions=return_exceptions)
 
-        with patch("streamrip.media.csv_playlist.asyncio.gather", side_effect=_mock_gather):
+        with patch(
+            "streamrip.media.csv_playlist.asyncio.gather", side_effect=_mock_gather
+        ):
             await pending.resolve()
 
         # With batch size 2 and 5 rows: batches of [2, 2, 1] → 3 gather calls

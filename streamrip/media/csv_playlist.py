@@ -130,14 +130,10 @@ def _item_album(source: str, item: dict) -> str:
 
 def _item_date(source: str, item: dict) -> str:
     if source == "deezer":
-        return (
-            item.get("release_date")
-            or item.get("album", {}).get("release_date", "")
-        )
+        return item.get("release_date") or item.get("album", {}).get("release_date", "")
     if source == "qobuz":
-        return (
-            item.get("release_date_original")
-            or item.get("album", {}).get("release_date_original", "")
+        return item.get("release_date_original") or item.get("album", {}).get(
+            "release_date_original", ""
         )
     if source == "tidal":
         return item.get("streamStartDate", "") or item.get("album", {}).get(
@@ -282,6 +278,27 @@ class PendingCsvTrack(Pending):
         Returns a :class:`Track` on success, or ``None`` if no combination
         succeeded (the failure is logged).
         """
+        # Pre-check: if *either* candidate is already in the downloads DB, skip the
+        # whole track immediately.  This prevents the fallback service from re-
+        # downloading a track that was already obtained via the primary service (or
+        # vice-versa) in a previous run.  The inner check inside ``_try_candidate``
+        # remains as a safety net for concurrent same-session downloads.
+        for cand in (
+            c
+            for c in (self.primary_candidate, self.fallback_candidate)
+            if c is not None
+        ):
+            if self.db.downloaded(cand.id, source=cand.source):
+                logger.info(
+                    "Track %s:%s already downloaded. Skipping '%s' by %s.",
+                    cand.source,
+                    cand.id,
+                    self.row.track_name,
+                    self.row.artists_raw,
+                )
+                self.db.set_skipped()
+                return None
+
         max_passes = max(
             len(self.primary_qualities) if self.primary_candidate else 0,
             len(self.fallback_qualities) if self.fallback_candidate else 0,
@@ -307,9 +324,11 @@ class PendingCsvTrack(Pending):
                     return track
 
         # All passes exhausted
-        reason = "no candidate found" if (
-            self.primary_candidate is None and self.fallback_candidate is None
-        ) else "all quality/service combinations failed"
+        reason = (
+            "no candidate found"
+            if (self.primary_candidate is None and self.fallback_candidate is None)
+            else "all quality/service combinations failed"
+        )
 
         logger.warning(
             "Could not download '%s' by %s (%s)",
@@ -405,7 +424,9 @@ class PendingCsvTrack(Pending):
         if tag_map:
             try:
                 provider_genre = album.get_genres() if album.genre else None
-                meta.extra_tags = _build_extra_tags(self.row, provider_genre, dict(tag_map))
+                meta.extra_tags = _build_extra_tags(
+                    self.row, provider_genre, dict(tag_map)
+                )
             except Exception as e:
                 logger.warning("Failed to build extra tags for '%s': %s", meta.title, e)
 
@@ -504,6 +525,7 @@ class PendingCsvPlaylist(Pending):
         folder = os.path.join(parent, clean_filepath(self.playlist_name))
 
         status = self.Status(0, 0, 0, len(self.rows))
+        fail_fast = self.config.session.reliability.fail_fast
 
         primary_qualities = _build_quality_sequence(
             self.primary_client.source,
@@ -521,8 +543,21 @@ class PendingCsvPlaylist(Pending):
 
         show_progress = self.config.session.cli.progress_bars
 
+        def _handle_batch_results(results):
+            """Process asyncio.gather results; return True to stop (fail_fast)."""
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Batch resolver error: %s", result)
+                    status.failed += 1
+                    if fail_fast:
+                        return True  # signal stop
+                elif result is not None:
+                    pending_tracks.append(result)
+            return False
+
         if show_progress:
             with console.status(status.text(), spinner="moon") as st:
+
                 async def _update():
                     st.update(status.text())
 
@@ -542,13 +577,13 @@ class PendingCsvPlaylist(Pending):
 
                 for batch in _chunks(self.rows, _RESOLVER_BATCH_SIZE):
                     results = await _resolve_batch(batch)
-                    for result in results:
-                        if isinstance(result, Exception):
-                            logger.error("Batch resolver error: %s", result)
-                            status.failed += 1
-                        elif result is not None:
-                            pending_tracks.append(result)
+                    if _handle_batch_results(results):
+                        logger.warning(
+                            "fail_fast: stopping CSV resolver after batch error."
+                        )
+                        break
         else:
+
             async def _resolve_row_plain(row):
                 return await self._resolve_row(
                     row,
@@ -562,12 +597,11 @@ class PendingCsvPlaylist(Pending):
             for batch in _chunks(self.rows, _RESOLVER_BATCH_SIZE):
                 coros = [_resolve_row_plain(row) for row in batch]
                 results = await asyncio.gather(*coros, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error("Batch resolver error: %s", result)
-                        status.failed += 1
-                    elif result is not None:
-                        pending_tracks.append(result)
+                if _handle_batch_results(results):
+                    logger.warning(
+                        "fail_fast: stopping CSV resolver after batch error."
+                    )
+                    break
 
         logger.info(
             "CSV resolve complete: %d found, %d failed, %d unresolved out of %d rows",
@@ -578,7 +612,9 @@ class PendingCsvPlaylist(Pending):
         )
 
         if not pending_tracks:
-            logger.warning("No tracks could be resolved from CSV '%s'", self.playlist_name)
+            logger.warning(
+                "No tracks could be resolved from CSV '%s'", self.playlist_name
+            )
             return None
 
         return Playlist(
@@ -655,7 +691,9 @@ class PendingCsvPlaylist(Pending):
                     isrc=row.isrc,
                     spotify_uri=row.spotify_uri,
                     primary_source=self.primary_client.source,
-                    fallback_source=self.fallback_client.source if self.fallback_client else "",
+                    fallback_source=self.fallback_client.source
+                    if self.fallback_client
+                    else "",
                     reason="no search results from any service",
                     row_index=row.row_index,
                 )

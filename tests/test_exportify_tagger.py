@@ -112,6 +112,7 @@ def test_genre_merge_with_provider_genres():
 def test_extra_tags_exception_logged_not_raised(caplog):
     """A failure writing extra tags must not fail the track."""
     import logging
+
     # Simulate a bad tag name that mutagen might struggle with
     # An empty key will fail
     with caplog.at_level(logging.WARNING, logger="streamrip"):

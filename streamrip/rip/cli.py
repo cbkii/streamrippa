@@ -318,7 +318,11 @@ async def file(ctx, path, list_mode, source, fallback_source):
             async with Main(cfg) as main:
                 # Resolve effective source / fallback for CSV mode
                 _source = source or cfg.session.lastfm.source
-                _fallback = fallback_source if fallback_source is not None else cfg.session.lastfm.fallback_source
+                _fallback = (
+                    fallback_source
+                    if fallback_source is not None
+                    else cfg.session.lastfm.fallback_source
+                )
 
                 async with aiofiles.open(path, "r", encoding="utf-8-sig") as f:
                     content = await f.read()
@@ -326,6 +330,7 @@ async def file(ctx, path, list_mode, source, fallback_source):
                 # Determine mode
                 if list_mode == "auto":
                     from ..file_lists import detect_file_mode
+
                     effective_mode = detect_file_mode(content)
                 else:
                     effective_mode = list_mode.lower()

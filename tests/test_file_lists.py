@@ -52,7 +52,9 @@ def test_detect_json_mode():
 
 def test_detect_exportify_csv_mode():
     content = _make_csv(
-        ['"spotify:track:abc","Song","Album","Artist","2022-01-01",180000,50,"user","2022","","","ISRC123","","","1"']
+        [
+            '"spotify:track:abc","Song","Album","Artist","2022-01-01",180000,50,"user","2022","","","ISRC123","","","1"'
+        ]
     )
     assert detect_file_mode(content) == "exportify-csv"
 
@@ -84,7 +86,9 @@ def test_detect_mode_json_list_only():
 
 def test_parse_basic_row():
     content = _make_csv(
-        ['"spotify:track:abc","Blue in Green","Kind of Blue","Miles Davis","1959-03-02",337800,85,"","","Jazz","","USBN41601500","-15.2","120.3","1"']
+        [
+            '"spotify:track:abc","Blue in Green","Kind of Blue","Miles Davis","1959-03-02",337800,85,"","","Jazz","","USBN41601500","-15.2","120.3","1"'
+        ]
     )
     path = _write_tmp_csv(content)
     try:
@@ -110,7 +114,9 @@ def test_parse_basic_row():
 
 def test_parse_semicolon_artists():
     content = _make_csv(
-        ['"spotify:track:xyz","Song","Album","Artist A;Artist B;Artist C","2020","180000","70","","","","","","","","1"']
+        [
+            '"spotify:track:xyz","Song","Album","Artist A;Artist B;Artist C","2020","180000","70","","","","","","","","1"'
+        ]
     )
     path = _write_tmp_csv(content)
     try:
@@ -123,10 +129,11 @@ def test_parse_semicolon_artists():
 
 def test_parse_utf8_bom():
     # Write file with BOM
-    f = tempfile.NamedTemporaryFile(
-        mode="wb", suffix=".csv", delete=False
-    )
-    data = (EXPORTIFY_HEADER + '"spotify:track:bom","BOM Track","BOM Album","Artist","2023","","50","","","","","","","","1"\n').encode("utf-8-sig")
+    f = tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False)
+    data = (
+        EXPORTIFY_HEADER
+        + '"spotify:track:bom","BOM Track","BOM Album","Artist","2023","","50","","","","","","","","1"\n'
+    ).encode("utf-8-sig")
     f.write(data)
     f.close()
     try:
@@ -250,32 +257,44 @@ def _make_row(
 
 def test_score_exact_isrc_wins():
     row = _make_row(isrc="USBN41601500")
-    score = score_candidate(row, "Completely Different Title", "Wrong Artist", "", "", "USBN41601500")
+    score = score_candidate(
+        row, "Completely Different Title", "Wrong Artist", "", "", "USBN41601500"
+    )
     assert score == 100
 
 
 def test_score_exact_title_artist():
     row = _make_row()
-    score = score_candidate(row, "Blue in Green", "Miles Davis", "Kind of Blue", "1959", "")
+    score = score_candidate(
+        row, "Blue in Green", "Miles Davis", "Kind of Blue", "1959", ""
+    )
     assert score >= 60
 
 
 def test_score_title_album_bonus():
     row = _make_row()
-    score = score_candidate(row, "Blue in Green", "Unknown Artist", "Kind of Blue", "1959", "")
+    score = score_candidate(
+        row, "Blue in Green", "Unknown Artist", "Kind of Blue", "1959", ""
+    )
     assert 40 <= score < 60
 
 
 def test_score_year_bonus():
     row = _make_row(date="1959")
-    score_with_year = score_candidate(row, "Blue in Green", "Miles Davis", "", "1959", "")
-    score_without_year = score_candidate(row, "Blue in Green", "Miles Davis", "", "2010", "")
+    score_with_year = score_candidate(
+        row, "Blue in Green", "Miles Davis", "", "1959", ""
+    )
+    score_without_year = score_candidate(
+        row, "Blue in Green", "Miles Davis", "", "2010", ""
+    )
     assert score_with_year > score_without_year
 
 
 def test_score_no_match():
     row = _make_row()
-    score = score_candidate(row, "Completely Different Song", "Other Artist", "Other Album", "2022", "")
+    score = score_candidate(
+        row, "Completely Different Song", "Other Artist", "Other Album", "2022", ""
+    )
     assert score == 0
 
 

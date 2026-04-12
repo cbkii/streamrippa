@@ -76,9 +76,7 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
             except (ValueError, TypeError):
                 position = i + 1
 
-            isrc = (
-                (row.get("ISRC") or row.get("Track ISRC") or "").strip()
-            )
+            isrc = (row.get("ISRC") or row.get("Track ISRC") or "").strip()
 
             rows.append(
                 ExportifyCsvRow(
