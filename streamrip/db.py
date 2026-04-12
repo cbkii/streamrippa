@@ -333,7 +333,7 @@ class Database:
     downloads: DatabaseInterface
     failed: DatabaseInterface
     failed_log: FailedTrackLog | None = field(default=None)
-    unresolved_log: "UnresolvedQueryLog | None" = field(default=None)
+    unresolved_log: UnresolvedQueryLog | None = field(default=None)
     stats: SessionStats = field(default_factory=SessionStats)
 
     def downloaded(self, item_id: str, source: str | None = None) -> bool:

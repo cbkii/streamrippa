@@ -235,12 +235,12 @@ def _build_extra_tags(
                 if provider_genre
                 else []
             )
-            seen: dict[str, None] = {}
+            seen: set[str] = set()
             merged: list[str] = []
             for g in provider_genres + csv_genres:
                 lower_g = g.lower()
                 if lower_g not in seen:
-                    seen[lower_g] = None
+                    seen.add(lower_g)
                     merged.append(g)
             if merged:
                 extra[target_tag] = ", ".join(merged)
@@ -283,11 +283,12 @@ class PendingCsvTrack(Pending):
         # downloading a track that was already obtained via the primary service (or
         # vice-versa) in a previous run.  The inner check inside ``_try_candidate``
         # remains as a safety net for concurrent same-session downloads.
-        for cand in (
+        candidates = [
             c
             for c in (self.primary_candidate, self.fallback_candidate)
             if c is not None
-        ):
+        ]
+        for cand in candidates:
             if self.db.downloaded(cand.id, source=cand.source):
                 logger.info(
                     "Track %s:%s already downloaded. Skipping '%s' by %s.",
