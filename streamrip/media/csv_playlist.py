@@ -585,7 +585,7 @@ class PendingCsvPlaylist(Pending):
             self.playlist_name,
             self.config,
             self.primary_client,
-            pending_tracks,  # type: ignore[arg-type]
+            pending_tracks,
         )
 
     async def _resolve_row(

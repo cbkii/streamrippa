@@ -118,7 +118,7 @@ class Playlist(Media):
     name: str
     config: Config
     client: Client
-    tracks: list
+    tracks: list[Pending]
 
     async def preprocess(self):
         progress.add_title(self.name)
@@ -131,7 +131,7 @@ class Playlist(Media):
         total = len(self.tracks)
         completed = 0
 
-        async def _resolve_download(item):
+        async def _resolve_download(item: Pending):
             try:
                 track = await item.resolve()
                 if track is None:
