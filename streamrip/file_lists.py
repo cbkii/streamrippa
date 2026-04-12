@@ -218,13 +218,13 @@ def score_candidate_repair(
     Tries the standard :func:`score_candidate` first; if that returns 0 (no
     title match), falls back to a fuzzy title comparison using
     :class:`difflib.SequenceMatcher`.  The fuzzy score only activates if the
-    normalised title similarity ratio is ≥ 0.82 so clearly wrong results are
+    normalised title similarity ratio is ≥ 0.80 so clearly wrong results are
     not promoted.
 
     Fuzzy scoring tiers (applied only when the standard scorer returns 0):
-    - Fuzzy ratio ≥ 0.82 + artist overlap → 35
-    - Fuzzy ratio ≥ 0.82 + album partial match → 28
-    - Fuzzy ratio ≥ 0.82 only → 20
+    - Fuzzy ratio ≥ 0.80 + artist overlap → 35
+    - Fuzzy ratio ≥ 0.80 + album partial match → 28
+    - Fuzzy ratio ≥ 0.80 only → 20
     - Release year bonus (+5) applied on top of fuzzy tier
 
     ISRC match still short-circuits to 100 (handled inside
