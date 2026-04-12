@@ -183,6 +183,10 @@ class MetadataConfig:
     # The following metadata tags won't be applied
     # See https://github.com/nathom/streamrip/wiki/Metadata-Tag-Names for more info
     exclude: list[str]
+    # Exportify CSV column -> file metadata tag mapping (Exportify CSV mode only).
+    # Best-effort only: failures are logged but never fail a track or the batch.
+    # Empty map disables all Exportify extra metadata mapping.
+    exportify_tag_map: dict
 
 
 @dataclass(slots=True)

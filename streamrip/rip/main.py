@@ -14,6 +14,7 @@ from ..media import (
     Pending,
     PendingAlbum,
     PendingArtist,
+    PendingCsvPlaylist,
     PendingLabel,
     PendingLastfmPlaylist,
     PendingPlaylist,
@@ -72,6 +73,10 @@ class Main:
             failed_log = None
 
         self.database = db.Database(downloads_db, failed_downloads_db, failed_log)
+
+    def _enable_unresolved_log(self, path: str) -> None:
+        """Attach an :class:`~streamrip.db.UnresolvedQueryLog` to the database."""
+        self.database.unresolved_log = db.UnresolvedQueryLog(path)
 
     async def add(self, url: str):
         """Add url as a pending item.
@@ -344,6 +349,56 @@ class Main:
 
         if playlist is not None:
             self.media.append(playlist)
+
+    async def resolve_csv(
+        self,
+        playlist_name: str,
+        rows: list,
+        source: str,
+        fallback_source: str,
+        unresolved_log_path: str | None = None,
+    ) -> None:
+        """Resolve an Exportify CSV row list into a downloadable playlist.
+
+        Args:
+            playlist_name: Name derived from the CSV filename stem.
+            rows: Parsed :class:`~streamrip.rip.file_lists.ExportifyCsvRow` list.
+            source: Primary search source (e.g. ``"qobuz"``).
+            fallback_source: Fallback search source; empty string disables fallback.
+            unresolved_log_path: Optional path for the unresolved-query CSV log.
+        """
+        if unresolved_log_path:
+            self._enable_unresolved_log(unresolved_log_path)
+
+        primary_client = await self.get_logged_in_client(source)
+        fallback_client: Client | None = None
+        if fallback_source:
+            fallback_client = await self.get_logged_in_client(fallback_source)
+
+        pending_playlist = PendingCsvPlaylist(
+            playlist_name=playlist_name,
+            rows=rows,
+            primary_client=primary_client,
+            fallback_client=fallback_client,
+            config=self.config,
+            db=self.database,
+        )
+
+        console.print(
+            f"Resolving [yellow]{len(rows)}[/yellow] tracks from "
+            f"[cyan]{playlist_name}[/cyan] using [green]{source}[/green]"
+            + (f" / [blue]{fallback_source}[/blue]" if fallback_source else "")
+        )
+
+        playlist = await pending_playlist.resolve()
+        if playlist is not None:
+            self.media.append(playlist)
+
+        if self.database.unresolved_log and self.database.unresolved_log.has_entries:
+            console.print(
+                f"[yellow]Unresolved CSV tracks logged to: "
+                f"[cyan]{self.database.unresolved_log.path}"
+            )
 
     async def __aenter__(self):
         return self

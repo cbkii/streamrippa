@@ -43,7 +43,7 @@ class PendingPlaylistTrack(Pending):
     db: Database
 
     async def resolve(self) -> Track | None:
-        if self.db.downloaded(self.id):
+        if self.db.downloaded(self.id, source=self.client.source):
             logger.info(f"Track ({self.id}) already logged in database. Skipping.")
             self.db.set_skipped()
             return None
@@ -118,7 +118,7 @@ class Playlist(Media):
     name: str
     config: Config
     client: Client
-    tracks: list[PendingPlaylistTrack]
+    tracks: list
 
     async def preprocess(self):
         progress.add_title(self.name)
@@ -131,7 +131,7 @@ class Playlist(Media):
         total = len(self.tracks)
         completed = 0
 
-        async def _resolve_download(item: PendingPlaylistTrack):
+        async def _resolve_download(item):
             try:
                 track = await item.resolve()
                 if track is None:

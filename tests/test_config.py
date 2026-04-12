@@ -220,6 +220,7 @@ def test_sample_config_data_fields(sample_config_data):
             set_playlist_to_album=True,
             renumber_playlist_tracks=True,
             exclude=[],
+            exportify_tag_map={"Genres": "genre", "Loudness": "exportify_loudness", "Tempo": "tempo"},
         ),
         qobuz_filters=QobuzDiscographyFilterConfig(
             extras=False,

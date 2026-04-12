@@ -33,6 +33,10 @@ class TrackMetadata:
     composer: str | None
     isrc: str | None = None
     lyrics: str | None = ""
+    # Optional extra tags to write after the standard built-in tags.
+    # Used by Exportify CSV mode to carry additional CSV columns into the file.
+    # Keys are target tag names; values are the string to write.
+    extra_tags: dict | None = None
 
     @classmethod
     def from_qobuz(cls, album: AlbumMetadata, resp: dict) -> TrackMetadata | None:

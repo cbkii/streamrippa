@@ -256,3 +256,68 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
     if cover_path is not None:
         await container.embed_cover(audio, cover_path)
     container.save_audio(audio, path)
+
+    # Write extra tags if present (Exportify CSV mode).  Best-effort only:
+    # failures are logged and never propagate.
+    if meta.extra_tags:
+        try:
+            await _write_extra_tags(path, container, audio, meta.extra_tags)
+        except Exception as e:
+            logger.warning("Failed to write extra tags to '%s': %s", path, e)
+
+
+async def _write_extra_tags(
+    path: str,
+    container: Container,
+    audio,
+    extra_tags: dict,
+) -> None:
+    """Write extra (non-standard) tags to an already-opened mutagen audio object.
+
+    Blank values are skipped.  Each tag write is isolated so a failure on one
+    tag does not prevent the others from being written.
+
+    - FLAC: Vorbis comment (uppercase key)
+    - MP3: TXXX user-text frame
+    - MP4/M4A: freeform ``----:com.apple.iTunes:<key>`` atom
+    """
+    changed = False
+    for tag_name, value in extra_tags.items():
+        if not value:
+            continue
+        try:
+            _write_single_extra_tag(container, audio, tag_name, str(value))
+            changed = True
+        except Exception as e:
+            logger.warning(
+                "Could not write extra tag '%s' = '%s': %s", tag_name, value, e
+            )
+
+    if changed:
+        container.save_audio(audio, path)
+
+
+def _write_single_extra_tag(
+    container: Container,
+    audio,
+    tag_name: str,
+    value: str,
+) -> None:
+    """Write one custom/freeform tag using the container-appropriate method."""
+    if container == Container.FLAC:
+        # Vorbis comments: keys are case-insensitive; use uppercase by convention
+        key = tag_name.upper()
+        audio[key] = value
+    elif container == Container.MP3:
+        # TXXX: ID3 user-text frame
+        from mutagen import id3 as _id3
+
+        desc = tag_name
+        frame = _id3.TXXX(encoding=3, desc=desc, text=value)
+        audio.add(frame)
+    elif container == Container.AAC:
+        # MP4 freeform atom
+        import mutagen.mp4 as _mp4
+
+        key = f"----:com.apple.iTunes:{tag_name}"
+        audio[key] = [_mp4.MP4FreeForm(value.encode("utf-8"))]
