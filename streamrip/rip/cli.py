@@ -635,6 +635,71 @@ async def repair(ctx):
         sys.exit(1)
 
 
+@rip.command("repair-csv")
+@click.argument(
+    "path",
+    required=True,
+    type=click.Path(exists=True, readable=True, file_okay=True, dir_okay=False),
+)
+@click.option(
+    "-s",
+    "--source",
+    "source",
+    default=None,
+    help=("Primary search source for repair (default: [lastfm].source from config)."),
+)
+@click.option(
+    "-fs",
+    "--fallback-source",
+    "fallback_source",
+    default=None,
+    help=(
+        "Fallback search source for repair "
+        "(default: [lastfm].fallback_source from config)."
+    ),
+)
+@click.pass_context
+@coro
+async def repair_csv(ctx, path, source, fallback_source):
+    """Retry unresolved rows from a previous Exportify CSV import.
+
+    Reads the ``*_unresolved.csv`` log produced by a prior ``rip file``
+    Exportify CSV run and attempts to resolve each row again using:
+
+    \\b
+    - an expanded search window (3x normal),
+    - fuzzy title matching as a fallback when exact matching fails.
+
+    Rows that still cannot be resolved are written to a new
+    ``<stem>_repair_unresolved.csv`` file for further audit.
+
+    Example usage:
+
+        rip repair-csv Liked_Songs_unresolved.csv
+
+        rip repair-csv --source qobuz --fallback-source deezer Liked_Songs_unresolved.csv
+    """
+    cfg: Config | None = ctx.obj.get("config")
+    if cfg is None:
+        console.print("[red]No config loaded. Cannot run repair-csv.[/red]")
+        return
+
+    failures = 0
+    with cfg as c:
+        _source = source or c.session.lastfm.source
+        _fallback_source = fallback_source or c.session.lastfm.fallback_source or ""
+        async with Main(c) as main:
+            await main.repair_csv(
+                unresolved_csv_path=path,
+                source=_source,
+                fallback_source=_fallback_source,
+            )
+            failures = await main.rip()
+
+    if failures > 0:
+        sys.exit(1)
+
+
 async def latest_streamrip_version(verify_ssl: bool = True) -> tuple[str, str | None]:
     """Get the latest streamrip version from PyPI and release notes from GitHub.
 

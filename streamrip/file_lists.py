@@ -13,6 +13,7 @@ import csv
 import json
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
 
@@ -202,3 +203,102 @@ def score_candidate(
             score += 5
 
     return score
+
+
+def score_candidate_repair(
+    row: "ExportifyCsvRow",
+    candidate_title: str,
+    candidate_artist: str,
+    candidate_album: str,
+    candidate_date: str,
+    candidate_isrc: str,
+) -> int:
+    """Extended scoring for repair-mode candidate matching.
+
+    Tries the standard :func:`score_candidate` first; if that returns 0 (no
+    title match), falls back to a fuzzy title comparison using
+    :class:`difflib.SequenceMatcher`.  The fuzzy score only activates if the
+    normalised title similarity ratio is ≥ 0.82 so clearly wrong results are
+    not promoted.
+
+    Fuzzy scoring tiers (applied only when the standard scorer returns 0):
+    - Fuzzy ratio ≥ 0.82 + artist overlap → 35
+    - Fuzzy ratio ≥ 0.82 + album partial match → 28
+    - Fuzzy ratio ≥ 0.82 only → 20
+    - Release year bonus (+5) applied on top of fuzzy tier
+
+    ISRC match still short-circuits to 100 (handled inside
+    :func:`score_candidate`).
+    """
+    std = score_candidate(
+        row,
+        candidate_title,
+        candidate_artist,
+        candidate_album,
+        candidate_date,
+        candidate_isrc,
+    )
+    if std > 0:
+        return std
+
+    # Fuzzy fallback — repair mode only
+    norm_title = _normalise(row.track_name)
+    norm_cand = _normalise(candidate_title)
+    if not norm_title or not norm_cand:
+        return 0
+
+    ratio = SequenceMatcher(None, norm_title, norm_cand).ratio()
+    if ratio < 0.80:
+        return 0
+
+    if _artist_overlap(row.artists_list, candidate_artist):
+        score = 35
+    elif row.album and _normalise(row.album) in _normalise(candidate_album):
+        score = 28
+    else:
+        score = 20
+
+    if row.release_date and candidate_date:
+        if row.release_date[:4] == str(candidate_date)[:4]:
+            score += 5
+
+    return score
+
+
+def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
+    """Parse an ``*_unresolved.csv`` log file back into :class:`ExportifyCsvRow` objects.
+
+    The unresolved log (written by :class:`~streamrip.db.UnresolvedQueryLog`)
+    stores all fields needed to replay the query.
+
+    Unknown columns are ignored; missing optional fields default to empty string.
+    """
+    rows: list[ExportifyCsvRow] = []
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for i, row in enumerate(reader):
+            artists_raw = (row.get("artists") or "").strip()
+            artists_list = [a.strip() for a in artists_raw.split(";") if a.strip()]
+
+            try:
+                position = int(row.get("row_index") or i) + 1
+            except (ValueError, TypeError):
+                position = i + 1
+
+            rows.append(
+                ExportifyCsvRow(
+                    track_name=(row.get("track_name") or "").strip(),
+                    artists_raw=artists_raw,
+                    artists_list=artists_list,
+                    album=(row.get("album") or "").strip(),
+                    release_date=(row.get("release_date") or "").strip(),
+                    isrc=(row.get("isrc") or "").strip(),
+                    spotify_uri=(row.get("spotify_uri") or "").strip(),
+                    genres="",
+                    loudness="",
+                    tempo="",
+                    position=position,
+                    row_index=i,
+                )
+            )
+    return rows

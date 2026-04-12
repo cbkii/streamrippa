@@ -41,7 +41,7 @@ from ..config import Config
 from ..console import console
 from ..db import Database
 from ..exceptions import NonStreamableError
-from ..file_lists import ExportifyCsvRow, score_candidate
+from ..file_lists import ExportifyCsvRow, score_candidate, score_candidate_repair
 from ..filepath_utils import clean_filepath
 from ..metadata import AlbumMetadata, Covers, TrackMetadata
 from .artwork import download_artwork
@@ -55,8 +55,11 @@ logger = logging.getLogger("streamrip")
 # Derived from a sensible maximum; deliberately not a user-facing config key.
 _RESOLVER_BATCH_SIZE = 10
 
-# Number of search results to fetch per service per row
+# Number of search results to fetch per service per row (normal import path)
 _SEARCH_LIMIT = 5
+
+# Expanded search window used in repair mode for heavier matching
+_REPAIR_SEARCH_LIMIT = 15
 
 
 @dataclass(slots=True)
@@ -192,6 +195,53 @@ def _pick_best_candidate(
     )
 
 
+def _pick_best_candidate_repair(
+    row: ExportifyCsvRow,
+    source: str,
+    pages: list[dict],
+    client: Client,
+) -> TrackCandidate | None:
+    """Repair-mode variant of :func:`_pick_best_candidate`.
+
+    Uses :func:`~streamrip.file_lists.score_candidate_repair` which includes
+    fuzzy title matching as a fallback when exact title matching fails.  Only
+    used from :class:`PendingCsvPlaylist` when ``repair_mode=True``.
+    """
+    items = _extract_raw_results(source, pages)
+    if not items:
+        return None
+
+    best_item = None
+    best_score = -1
+
+    for item in items:
+        title = _item_title(source, item)
+        artist = _item_artist(source, item)
+        album = _item_album(source, item)
+        date = _item_date(source, item)
+        isrc = _item_isrc(source, item)
+
+        sc = score_candidate_repair(row, title, artist, album, date, isrc)
+        if sc > best_score:
+            best_score = sc
+            best_item = item
+
+    if best_item is None or best_score <= 0:
+        return None
+
+    return TrackCandidate(
+        source=source,
+        id=str(best_item["id"]),
+        title=_item_title(source, best_item),
+        artist=_item_artist(source, best_item),
+        album=_item_album(source, best_item),
+        release_date=_item_date(source, best_item),
+        isrc=_item_isrc(source, best_item),
+        score=best_score,
+        client=client,
+    )
+
+
 def _build_extra_tags(
     row: ExportifyCsvRow,
     provider_genre: str | None,
@@ -250,12 +300,25 @@ def _build_extra_tags(
     return extra if extra else None
 
 
+@dataclass
+class _CandidateMeta:
+    """Cached metadata for a single candidate — fetched once, reused across quality passes."""
+
+    resp: dict
+    album: AlbumMetadata
+    meta: TrackMetadata
+
+
 @dataclass(slots=True)
 class PendingCsvTrack(Pending):
     """A track derived from an Exportify CSV row, ready to resolve and download.
 
     Holds pre-searched candidates from both the primary and fallback services
     and implements the service-first / quality-second fallback algorithm.
+
+    Metadata for each candidate is fetched **once** before the quality loop and
+    cached in ``_primary_meta`` / ``_fallback_meta`` so that repeated quality
+    passes for the same candidate do not incur repeated API calls.
     """
 
     row: ExportifyCsvRow
@@ -277,6 +340,10 @@ class PendingCsvTrack(Pending):
 
         Returns a :class:`Track` on success, or ``None`` if no combination
         succeeded (the failure is logged).
+
+        Metadata for each candidate is fetched exactly once before the quality
+        loop, so multiple quality passes for the same candidate never repeat
+        the metadata API call.
         """
         # Pre-check: if *either* candidate is already in the downloads DB, skip the
         # whole track immediately.  This prevents the fallback service from re-
@@ -300,25 +367,45 @@ class PendingCsvTrack(Pending):
                 self.db.set_skipped()
                 return None
 
+        # --- Fetch metadata for each candidate exactly once ---
+        primary_meta: _CandidateMeta | None = None
+        fallback_meta: _CandidateMeta | None = None
+
+        if self.primary_candidate is not None:
+            primary_meta = await self._fetch_candidate_meta(self.primary_candidate)
+
+        if self.fallback_candidate is not None:
+            fallback_meta = await self._fetch_candidate_meta(self.fallback_candidate)
+
+        # If metadata could not be fetched for a candidate it is treated as unavailable.
+        effective_primary = self.primary_candidate if primary_meta is not None else None
+        effective_fallback = (
+            self.fallback_candidate if fallback_meta is not None else None
+        )
+
         max_passes = max(
-            len(self.primary_qualities) if self.primary_candidate else 0,
-            len(self.fallback_qualities) if self.fallback_candidate else 0,
+            len(self.primary_qualities) if effective_primary else 0,
+            len(self.fallback_qualities) if effective_fallback else 0,
         )
 
         for pass_idx in range(max_passes):
             # --- Try primary service at this pass's quality ---
-            if self.primary_candidate and pass_idx < len(self.primary_qualities):
-                track = await self._try_candidate(
-                    self.primary_candidate,
+            if effective_primary and pass_idx < len(self.primary_qualities):
+                assert primary_meta is not None  # guaranteed above
+                track = await self._try_candidate_with_meta(
+                    effective_primary,
+                    primary_meta,
                     self.primary_qualities[pass_idx],
                 )
                 if track is not None:
                     return track
 
             # --- Try fallback service at this pass's quality ---
-            if self.fallback_candidate and pass_idx < len(self.fallback_qualities):
-                track = await self._try_candidate(
-                    self.fallback_candidate,
+            if effective_fallback and pass_idx < len(self.fallback_qualities):
+                assert fallback_meta is not None  # guaranteed above
+                track = await self._try_candidate_with_meta(
+                    effective_fallback,
+                    fallback_meta,
                     self.fallback_qualities[pass_idx],
                 )
                 if track is not None:
@@ -354,18 +441,17 @@ class PendingCsvTrack(Pending):
 
         return None
 
-    async def _try_candidate(
+    async def _fetch_candidate_meta(
         self,
         candidate: TrackCandidate,
-        quality: int,
-    ) -> Track | None:
-        """Attempt to resolve and prepare *candidate* at *quality*.
+    ) -> _CandidateMeta | None:
+        """Fetch and build metadata for *candidate*.  Returns ``None`` on any failure.
 
-        Returns a :class:`Track` on success, ``None`` on any failure.
-        The Deezer client is called with ``exact_quality=True`` so that it
-        raises :class:`NonStreamableError` instead of silently stepping down.
+        This is called **once per candidate** before the quality loop so that
+        subsequent quality passes can reuse the cached result without repeating
+        the API call.
         """
-        # Source-aware duplicate check
+        # Source-aware duplicate check (inner safety net for concurrent downloads)
         if self.db.downloaded(candidate.id, source=candidate.source):
             logger.info(
                 "Track %s:%s already in database. Skipping.",
@@ -379,10 +465,9 @@ class PendingCsvTrack(Pending):
             resp = await candidate.client.get_metadata(candidate.id, "track")
         except NonStreamableError as e:
             logger.debug(
-                "Could not fetch metadata for %s:%s at quality %d: %s",
+                "Could not fetch metadata for %s:%s: %s",
                 candidate.source,
                 candidate.id,
-                quality,
                 e,
             )
             return None
@@ -420,7 +505,7 @@ class PendingCsvTrack(Pending):
         if c.set_playlist_to_album:
             album.album = self.playlist_name
 
-        # Build extra tags from CSV row
+        # Build extra tags from CSV row (best-effort)
         tag_map = c.exportify_tag_map if hasattr(c, "exportify_tag_map") else {}
         if tag_map:
             try:
@@ -431,20 +516,33 @@ class PendingCsvTrack(Pending):
             except Exception as e:
                 logger.warning("Failed to build extra tags for '%s': %s", meta.title, e)
 
+        return _CandidateMeta(resp=resp, album=album, meta=meta)
+
+    async def _try_candidate_with_meta(
+        self,
+        candidate: TrackCandidate,
+        cached: _CandidateMeta,
+        quality: int,
+    ) -> Track | None:
+        """Attempt to obtain a downloadable for *candidate* at *quality*.
+
+        Uses pre-fetched metadata from *cached* — no additional API call is made.
+        Returns a :class:`Track` on success, ``None`` if the quality is unavailable.
+        """
         # Attempt download at the requested quality.
         # Pass exact_quality=True for Deezer so the caller controls stepping.
         is_deezer = candidate.source == "deezer"
         try:
             if is_deezer:
                 embedded_cover_path, downloadable = await asyncio.gather(
-                    self._download_cover(album.covers, candidate.client),
+                    self._download_cover(cached.album.covers, candidate.client),
                     candidate.client.get_downloadable(
                         candidate.id, quality, exact_quality=True
                     ),
                 )
             else:
                 embedded_cover_path, downloadable = await asyncio.gather(
-                    self._download_cover(album.covers, candidate.client),
+                    self._download_cover(cached.album.covers, candidate.client),
                     candidate.client.get_downloadable(candidate.id, quality),
                 )
         except NonStreamableError as e:
@@ -466,7 +564,7 @@ class PendingCsvTrack(Pending):
             return None
 
         return Track(
-            meta,
+            cached.meta,
             downloadable,
             self.config,
             self.folder,
@@ -492,6 +590,11 @@ class PendingCsvPlaylist(Pending):
     Runs searches on both *primary_client* and *fallback_client* (if present)
     in bounded batches, scores the results, and yields :class:`PendingCsvTrack`
     items that implement the service-first / quality-second fallback.
+
+    When ``repair_mode=True`` the resolver uses an expanded search window
+    (:data:`_REPAIR_SEARCH_LIMIT`) and fuzzy title scoring
+    (:func:`_pick_best_candidate_repair`) to recover rows that the lightweight
+    main-path scorer left unresolved.
     """
 
     playlist_name: str
@@ -500,6 +603,7 @@ class PendingCsvPlaylist(Pending):
     fallback_client: Client | None
     config: Config
     db: Database
+    repair_mode: bool = False
 
     @dataclass(slots=True)
     class Status:
@@ -634,8 +738,20 @@ class PendingCsvPlaylist(Pending):
         status: "PendingCsvPlaylist.Status",
         callback,
     ) -> PendingCsvTrack | None:
-        """Search both services for *row* and build a :class:`PendingCsvTrack`."""
+        """Search both services for *row* and build a :class:`PendingCsvTrack`.
+
+        When ``self.repair_mode`` is ``True``:
+        - Fetches up to :data:`_REPAIR_SEARCH_LIMIT` results per service (3x
+          the normal window).
+        - Uses :func:`_pick_best_candidate_repair` which applies fuzzy title
+          matching as a fallback when exact title matching fails.
+        """
         query = f"{row.track_name} {row.artists_list[0] if row.artists_list else row.artists_raw}"
+
+        search_limit = _REPAIR_SEARCH_LIMIT if self.repair_mode else _SEARCH_LIMIT
+        picker = (
+            _pick_best_candidate_repair if self.repair_mode else _pick_best_candidate
+        )
 
         primary_candidate: TrackCandidate | None = None
         fallback_candidate: TrackCandidate | None = None
@@ -643,9 +759,9 @@ class PendingCsvPlaylist(Pending):
         # Search primary service
         try:
             primary_pages = await self.primary_client.search(
-                "track", query, limit=_SEARCH_LIMIT
+                "track", query, limit=search_limit
             )
-            primary_candidate = _pick_best_candidate(
+            primary_candidate = picker(
                 row, self.primary_client.source, primary_pages, self.primary_client
             )
         except Exception as e:
@@ -660,9 +776,9 @@ class PendingCsvPlaylist(Pending):
         if self.fallback_client is not None:
             try:
                 fallback_pages = await self.fallback_client.search(
-                    "track", query, limit=_SEARCH_LIMIT
+                    "track", query, limit=search_limit
                 )
-                fallback_candidate = _pick_best_candidate(
+                fallback_candidate = picker(
                     row,
                     self.fallback_client.source,
                     fallback_pages,
