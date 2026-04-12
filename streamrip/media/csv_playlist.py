@@ -32,22 +32,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from rich.text import Text
 
-from .. import progress
 from ..client import Client
 from ..config import Config
 from ..console import console
 from ..db import Database
 from ..exceptions import NonStreamableError
+from ..file_lists import ExportifyCsvRow, score_candidate
 from ..filepath_utils import clean_filepath
 from ..metadata import AlbumMetadata, Covers, TrackMetadata
-from ..file_lists import ExportifyCsvRow, score_candidate
 from .artwork import download_artwork
-from .media import Media, Pending
-from .playlist import Playlist, PendingPlaylistTrack
+from .media import Pending
+from .playlist import Playlist
 from .track import Track
 
 logger = logging.getLogger("streamrip")

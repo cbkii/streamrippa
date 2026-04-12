@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 from functools import wraps
-from typing import Any
 
 import aiofiles
 import aiohttp

@@ -1,9 +1,10 @@
 """File list parsing utilities for the ``rip file`` command.
 
 Supports three modes:
-- json        – list of ``{"source", "media_type", "id"}`` objects
-- exportify-csv – Exportify-format CSV export from Spotify
-- urls         – whitespace-separated service URLs (default/fallback)
+
+- json: list of ``{"source", "media_type", "id"}`` objects
+- exportify-csv: Exportify-format CSV export from Spotify
+- urls: whitespace-separated service URLs (default/fallback)
 """
 
 from __future__ import annotations
