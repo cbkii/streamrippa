@@ -941,11 +941,27 @@ async def test_metadata_fetched_once_per_candidate_across_quality_passes():
     fetch_calls: list[str] = []
 
     async def _fake_fetch(self_arg, candidate):
+        """
+        Record the candidate's source and return a successful metadata fetch result with mocked metadata.
+        
+        Parameters:
+            self_arg: Unused; preserved to match the original method signature.
+            candidate: The track candidate whose `source` will be appended to `fetch_calls`.
+        
+        Returns:
+            _MetaFetchResult: An object with `status="ok"` and `meta` set to `mock_meta`.
+        """
         fetch_calls.append(candidate.source)
         return _MetaFetchResult(status="ok", meta=mock_meta)
 
     async def _fake_try(self_arg, candidate, cached, quality):
         # Always fail so all quality passes are exhausted
+        """
+        Simulate a failed candidate attempt so all quality passes are treated as exhausted.
+        
+        Returns:
+            (None, str): A two-tuple where the first element is `None` (no track) and the second is the failure reason; specifically `"quality unavailable"`.
+        """
         return None, "quality unavailable"
 
     with (
@@ -992,11 +1008,33 @@ async def test_metadata_fetch_failure_skips_candidate_quality_passes():
     )
 
     async def _fake_fetch(self_arg, candidate):
+        """
+        Simulate fetching metadata for a candidate in tests, returning a deterministic _MetaFetchResult.
+        
+        Parameters:
+            candidate: The candidate whose `source` determines the simulated outcome.
+        
+        Returns:
+            _MetaFetchResult: For candidates from `"qobuz"`, a result with `status="matched unavailable"`.
+            For all other sources, a result with `status="ok"` and `meta` set to `mock_meta`.
+        """
         if candidate.source == "qobuz":
             return _MetaFetchResult(status="matched unavailable")
         return _MetaFetchResult(status="ok", meta=mock_meta)
 
     async def _fake_try(self_arg, candidate, cached, quality):
+        """
+        Simulate attempting a candidate and always succeed for the first quality pass.
+        
+        Parameters:
+            self_arg: Placeholder for bound method `self` (unused).
+            candidate: Candidate being attempted (ignored by this fake).
+            cached: Cached metadata/state for the candidate (ignored).
+            quality: Quality level being attempted (ignored).
+        
+        Returns:
+            tuple: (track, status) where `track` is the mocked track returned to signal success and `status` is the string `"ok"`.
+        """
         return mock_track, "ok"  # fallback succeeds at first quality
 
     with (
@@ -1036,6 +1074,12 @@ async def test_metadata_fetch_provider_error_not_classified_as_unavailable(tmp_p
     )
 
     async def _fake_fetch(_self_arg, _candidate):
+        """
+        Simulate a metadata fetch that fails with a provider-level error.
+        
+        Returns:
+            _MetaFetchResult: An instance with `status` set to `"provider-error"`.
+        """
         return _MetaFetchResult(status="provider-error")
 
     with patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch):
@@ -1550,6 +1594,11 @@ async def test_repair_csv_prioritizes_availability_rows_when_country_changes(tmp
 
 @pytest.mark.asyncio
 async def test_repair_csv_prioritizes_no_results_reasons(tmp_path):
+    """
+    Ensure Main.repair_csv processes unresolved rows so entries with reason "no results" are ordered before those with "metadata mismatch".
+    
+    Writes a two-row unresolved CSV (one "metadata mismatch", one "no results"), invokes Main.repair_csv with qobuz primary and deezer fallback, and asserts the rows passed to resolve_csv are ordered with the "no results" row first.
+    """
     from unittest.mock import MagicMock, patch
 
     from streamrip.rip.main import Main
@@ -1586,6 +1635,14 @@ async def test_repair_csv_prioritizes_no_results_reasons(tmp_path):
         resolve_calls = []
 
         async def _fake_resolve_csv(**kwargs):
+            """
+            Record invocation arguments for a test double that simulates CSV resolution.
+            
+            Appends all keyword arguments received to the shared `resolve_calls` list so tests can inspect how the resolver was invoked.
+            
+            Parameters:
+                **kwargs: Arbitrary keyword arguments representing the invocation details to record.
+            """
             resolve_calls.append(kwargs)
 
         main.resolve_csv = _fake_resolve_csv

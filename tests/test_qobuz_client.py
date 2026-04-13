@@ -132,6 +132,15 @@ async def test_get_app_id_and_secrets_skips_empty_bundle_results():
     calls = {"n": 0}
 
     def _fake_extract(bundle):
+        """
+        Extract an app id and secrets list from a test bundle identifier.
+        
+        Parameters:
+            bundle (str): Test bundle identifier; the function treats "first" specially.
+        
+        Returns:
+            (app_id, secrets) (tuple): app_id is a string identifier; secrets is a list of secret strings (may be empty).
+        """
         calls["n"] += 1
         if bundle == "first":
             return "123", []
@@ -150,6 +159,23 @@ async def test_paginate_batches_requests(monkeypatch, client):
     calls = []
 
     async def _fake_api_request(epoint, params):
+        """
+        Fake async API responder used in tests to simulate a paginated album search response.
+        
+        Parameters:
+            epoint (str): API endpoint being requested (unused by the fake).
+            params (dict): Query parameters; `offset` may be provided to indicate page offset (defaults to 0).
+        
+        Returns:
+            tuple: A (status_code, response_json) pair where `status_code` is 200 and `response_json` is a dict with an `albums` page:
+                - `items`: list containing a single item whose `id` equals the requested offset
+                - `total`: 1300
+                - `limit`: 100
+                - `offset`: the requested offset
+        
+        Side effects:
+            Appends the effective `offset` value to the surrounding `calls` list.
+        """
         calls.append(params.get("offset", 0))
         offset = params.get("offset", 0)
         return (

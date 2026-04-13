@@ -561,6 +561,22 @@ class PendingCsvTrack(Pending):
 
     @staticmethod
     def _classify_failure(attempts: list[AttemptResult]) -> str:
+        """
+        Classify a list of attempt results into a human-readable failure category.
+        
+        Parameters:
+            attempts (list[AttemptResult]): Sequence of attempted (service, quality) attempts with their `status` strings.
+        
+        Returns:
+            str: A failure category describing why resolution/download did not succeed. Possible categories include:
+            - "all configured service/quality combinations exhausted"
+            - "matched item found, but unavailable on current service"
+            - "download attempt failed after a valid service/quality match"
+            - "matched item available, but requested/highest quality unavailable"
+            - "provider error while resolving matched candidate metadata"
+            - "metadata processing error for matched candidate"
+            - "matched candidate already downloaded in concurrent run"
+        """
         if not attempts:
             return "all configured service/quality combinations exhausted"
         statuses = {a.status for a in attempts}
@@ -582,11 +598,20 @@ class PendingCsvTrack(Pending):
         self,
         candidate: TrackCandidate,
     ) -> _MetaFetchResult:
-        """Fetch and build metadata for *candidate* with explicit outcome status.
-
-        This is called **once per candidate** before the quality loop so that
-        subsequent quality passes can reuse the cached result without repeating
-        the API call.
+        """
+        Fetch and assemble metadata for a single track candidate and return a structured outcome status.
+        
+        Performs a single metadata retrieval and constructs album and track metadata; callers should cache the result and reuse it across quality attempts. The returned _MetaFetchResult.status is one of:
+        - "ok": metadata successfully fetched and parsed; `_MetaFetchResult.meta` contains the constructed `_CandidateMeta`.
+        - "duplicate-race": candidate was already recorded as downloaded in the database; no metadata returned.
+        - "provider-error": the provider request failed or raised an unexpected error; no metadata returned.
+        - "matched unavailable": the provider response indicates the track or album is not streamable/available; no metadata returned.
+        - "metadata-error": the provider response could not be converted into required TrackMetadata; no metadata returned.
+        
+        On success, the returned `_MetaFetchResult.meta` holds:
+        - `resp`: raw provider response,
+        - `album`: `AlbumMetadata` built from the response,
+        - `meta`: `TrackMetadata` built from the response (may include configuration-driven adjustments and best-effort extra tags).
         """
         # Source-aware duplicate check (inner safety net for concurrent downloads)
         if self.db.downloaded(candidate.id, source=candidate.source):
@@ -664,10 +689,20 @@ class PendingCsvTrack(Pending):
         cached: _CandidateMeta,
         quality: int,
     ) -> tuple[Track | None, str]:
-        """Attempt to obtain a downloadable for *candidate* at *quality*.
-
-        Uses pre-fetched metadata from *cached* — no additional API call is made.
-        Returns a :class:`Track` on success, ``None`` if the quality is unavailable.
+        """
+        Try to produce a downloadable Track for the given candidate using already-fetched metadata.
+        
+        Parameters:
+            candidate (TrackCandidate): Candidate identifying source and track id.
+            cached (_CandidateMeta): Cached per-candidate metadata (album, track metadata, raw response) previously obtained.
+            quality (int): Desired quality step to request from the provider.
+        
+        Returns:
+            tuple[Track | None, str]: A pair of (track, status). `track` is a Track object on success, `None` otherwise.
+            `status` is one of:
+              - `"ok"`: downloadable obtained and Track constructed,
+              - `"quality unavailable"`: provider indicated the requested quality cannot be streamed,
+              - `"download failed"`: other error occurred while obtaining the downloadable.
         """
         # Attempt download at the requested quality.
         # Pass exact_quality=True for Deezer so the caller controls stepping.
@@ -901,6 +936,18 @@ class PendingCsvPlaylist(Pending):
         fallback_outcome = ResolverOutcome(None, "no results", "", "")
 
         async def _resolve_for_client(client: Client) -> ResolverOutcome:
+            """
+            Resolve the best TrackCandidate for a single client by optionally using an ID hint and then running layered search queries.
+            
+            Attempts an optional per-service ID hint (when repair mode and a hint exist); if that yields an acceptable match (score >= min_score) it is returned immediately. Otherwise runs the deterministic layered queries in order, scoring results with the configured picker and returning the first candidate that meets the minimum score. If no candidate meets the threshold the highest-scoring low-confidence candidate seen is returned. If any search invocation raised an exception and no candidate was selected, the outcome reason is `"search_failed"`. If no results were found and no errors occurred, the outcome reason is `"no results"`.
+            
+            Returns:
+                ResolverOutcome: Outcome with:
+                  - candidate: the selected TrackCandidate or `None` if none found,
+                  - reason: one of `"matched"`, `"low confidence (score<min_score)"`, `"search_failed"`, or `"no results"`,
+                  - query: the query string that produced the returned candidate (or the last attempted query on failure),
+                  - strategy: the query strategy that produced the returned candidate (or the last attempted strategy on failure).
+            """
             queries = _build_search_queries(row, client.source)
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
             had_error = False
