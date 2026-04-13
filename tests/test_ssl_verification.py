@@ -187,14 +187,15 @@ async def test_latest_streamrip_version_creates_session():
         mock_connector.return_value = MagicMock()
 
         # Setup mock responses for API calls
-        mock_session_instance = AsyncMock()
+        mock_session_instance = MagicMock()
         mock_client_session.return_value = mock_session_instance
+        mock_client_session.return_value.__aenter__.return_value = mock_session_instance
 
+        mock_response = AsyncMock()
+        mock_response.json.return_value = {"info": {"version": "1.0.0"}}
         mock_context_manager = AsyncMock()
+        mock_context_manager.__aenter__.return_value = mock_response
         mock_session_instance.get.return_value = mock_context_manager
-        mock_context_manager.__aenter__.return_value.json.return_value = {
-            "info": {"version": "1.0.0"}
-        }
 
         # Make sure the test doesn't actually wait
         with patch("streamrip.rip.cli.__version__", "1.0.0"):

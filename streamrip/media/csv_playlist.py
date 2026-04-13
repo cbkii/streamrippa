@@ -532,6 +532,12 @@ class PendingCsvTrack(Pending):
                 spotify_uri=self.row.spotify_uri,
                 primary_source=self.primary_source,
                 fallback_source=self.fallback_source,
+                primary_candidate_id=(
+                    self.primary_candidate.id if self.primary_candidate else ""
+                ),
+                fallback_candidate_id=(
+                    self.fallback_candidate.id if self.fallback_candidate else ""
+                ),
                 reason=reason,
                 row_index=self.row.row_index,
                 session_country=_session_country_hint(),
@@ -877,6 +883,60 @@ class PendingCsvPlaylist(Pending):
         async def _resolve_for_client(client: Client) -> ResolverOutcome:
             queries = _build_search_queries(row, client.source)
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
+
+            hinted_id = ""
+            if self.repair_mode and row.repair_candidate_ids:
+                hinted_id = (row.repair_candidate_ids.get(client.source) or "").strip()
+
+            if hinted_id:
+                try:
+                    hinted_resp = await client.get_metadata(hinted_id, "track")
+                    hinted_candidate = TrackCandidate(
+                        source=client.source,
+                        id=str(hinted_resp.get("id", hinted_id)),
+                        title=_item_title(client.source, hinted_resp),
+                        artist=_item_artist(client.source, hinted_resp),
+                        album=_item_album(client.source, hinted_resp),
+                        release_date=_item_date(client.source, hinted_resp),
+                        isrc=_item_isrc(client.source, hinted_resp),
+                        score=(
+                            score_candidate_repair(
+                                row,
+                                _item_title(client.source, hinted_resp),
+                                _item_artist(client.source, hinted_resp),
+                                _item_album(client.source, hinted_resp),
+                                _item_date(client.source, hinted_resp),
+                                _item_isrc(client.source, hinted_resp),
+                            )
+                            if self.repair_mode
+                            else score_candidate(
+                                row,
+                                _item_title(client.source, hinted_resp),
+                                _item_artist(client.source, hinted_resp),
+                                _item_album(client.source, hinted_resp),
+                                _item_date(client.source, hinted_resp),
+                                _item_isrc(client.source, hinted_resp),
+                            )
+                        ),
+                        client=client,
+                    )
+                    reason = _candidate_reason(hinted_candidate, min_score)
+                    if reason == "matched":
+                        return ResolverOutcome(
+                            candidate=hinted_candidate,
+                            reason=reason,
+                            query=hinted_id,
+                            strategy="id-hint",
+                        )
+                    best_low_conf = (hinted_id, "id-hint", hinted_candidate)
+                except Exception as e:
+                    logger.debug(
+                        "Hinted metadata lookup failed on %s id=%s: %s",
+                        client.source,
+                        hinted_id,
+                        e,
+                    )
+
             for strategy, query in queries:
                 try:
                     pages = await client.search("track", query, limit=search_limit)
@@ -967,6 +1027,16 @@ class PendingCsvPlaylist(Pending):
                     else "",
                     reason=failure_reasons or "metadata mismatch",
                     row_index=row.row_index,
+                    primary_candidate_id=(
+                        primary_outcome.candidate.id
+                        if primary_outcome.candidate is not None
+                        else ""
+                    ),
+                    fallback_candidate_id=(
+                        fallback_outcome.candidate.id
+                        if fallback_outcome.candidate is not None
+                        else ""
+                    ),
                     session_country=_session_country_hint(),
                     query_strategy=" / ".join(
                         s
