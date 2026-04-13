@@ -183,7 +183,17 @@ _VARIANT_MARKERS: frozenset[str] = frozenset(
 
 
 def _normalise_variant_text(s: str) -> str:
-    """Return a normalised string with common edition/version markers removed."""
+    """
+    Normalize a track/album title and remove common edition/version markers and standalone year tokens.
+
+    Performs the same normalization as _normalise, then strips known variant markers (e.g. "live", "remaster", "feat") when they appear as standalone words and removes standalone four-digit years starting with 19 or 20. Collapses repeated whitespace and returns an empty string if the resulting text is empty.
+
+    Parameters:
+        s (str): Input text to normalise.
+
+    Returns:
+        str: Normalised text with variant markers and standalone year tokens removed.
+    """
     norm = _normalise(s)
     if not norm:
         return ""
@@ -261,17 +271,25 @@ def score_candidate(
     candidate_date: str,
     candidate_isrc: str,
 ) -> int:
-    """Deterministically score a search-result candidate against a CSV row.
+    """
+    Score how well a search-result candidate matches a CSV row from an Exportify export.
 
-    Scoring rules (higher = better match):
-    - Exact ISRC match → 100 (short-circuits other checks)
-    - Normalised title match + artist overlap → 60
-    - Normalised title match + album partial match → 50
-    - Normalised title match only → 40
-    - Release year bonus (+5) applied on top
+    Uses deterministic heuristics combining ISRC, title, artist, album and release year:
+    - Exact ISRC match yields 100.
+    - Requires either exact normalised title match or exact normalised-variant title match to produce a non-zero score.
+    - Base score for title match is 42, with bonuses for exact normalised title, artist coverage, album match, and year; penalties for variant/edition mismatches.
+    - Minimum positive score for matching titles is 1.
+
+    Parameters:
+        row (ExportifyCsvRow): CSV row providing `track_name`, `artists_list`, `album`, `release_date`, and optional `isrc`.
+        candidate_title (str): Candidate track title to compare.
+        candidate_artist (str): Candidate artist string to compare against `row.artists_list`.
+        candidate_album (str): Candidate album string to compare.
+        candidate_date (str): Candidate release date string to compare for year bonus.
+        candidate_isrc (str): Candidate ISRC code for exact-match short-circuit.
 
     Returns:
-        Integer score; 0 means no title match.
+        int: Numeric match score. `100` indicates exact ISRC match; `0` indicates no title match; otherwise a positive score (at least `1`) representing match strength.
     """
     # ISRC match is definitive
     if row.isrc and candidate_isrc:

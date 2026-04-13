@@ -289,6 +289,14 @@ class UnresolvedQueryLog:
     ]
 
     def __init__(self, path: str):
+        """
+        Initialize the unresolved-query CSV log for the given path.
+
+        If the file does not exist, create it and write the expected header. If the file exists, read and validate its header against FIELDNAMES; when the header is empty or differs, rotate the existing file to a UTC timestamped `.bak`, emit a warning, and create a new file with the correct header. Initializes the session entry flag to False.
+
+        Parameters:
+            path (str): Filesystem path to the unresolved-query CSV file.
+        """
         self.path = path
         self._has_entries = False
         if not os.path.exists(path):
@@ -313,6 +321,11 @@ class UnresolvedQueryLog:
             self._write_header()
 
     def _write_header(self) -> None:
+        """
+        Write the CSV header to self.path, creating or overwriting the file.
+
+        Opens the file with UTF-8 encoding and platform-neutral newlines, then writes a header row using FIELDNAMES.
+        """
         with open(self.path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
             writer.writeheader()
@@ -336,7 +349,27 @@ class UnresolvedQueryLog:
         attempted_query: str = "",
         attempt_trace: str = "",
     ):
-        """Append an unresolved-query entry to the CSV log."""
+        """
+        Append a timestamped unresolved-query row to the CSV log file.
+
+        Parameters:
+            track_name (str): Track title from the CSV row.
+            artists (str): Artist(s) string from the CSV row.
+            album (str): Album name from the CSV row.
+            release_date (str): Release date string from the CSV row.
+            isrc (str): ISRC identifier if present.
+            spotify_uri (str): Original Spotify URI if present.
+            primary_source (str): Primary provider/source attempted.
+            fallback_source (str): Fallback provider/source attempted.
+            reason (str): Short explanation why the row could not be resolved.
+            row_index (int): Index or line number of the CSV row being logged.
+            primary_candidate_id (str): Candidate ID returned by the primary source, if any.
+            fallback_candidate_id (str): Candidate ID returned by the fallback source, if any.
+            session_country (str): Session country code used for the attempt, if any.
+            query_strategy (str): Strategy label used to build the attempted query.
+            attempted_query (str): The actual query string that was attempted.
+            attempt_trace (str): Debug/trace information describing attempt steps or failures.
+        """
         self._has_entries = True
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
