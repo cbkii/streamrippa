@@ -1,16 +1,30 @@
 import hashlib
 import logging
 import os
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from util import arun
 
 from streamrip.client.downloadable import BasicDownloadable
-from streamrip.client.qobuz import QobuzClient
+from streamrip.client.qobuz import QobuzClient, QobuzSpoofer
 from streamrip.config import Config
-from streamrip.exceptions import MissingCredentialsError
+from streamrip.exceptions import (
+    AuthenticationError,
+    InvalidAppSecretError,
+    MissingCredentialsError,
+    NonStreamableError,
+)
 
 logger = logging.getLogger("streamrip")
+
+
+@pytest.fixture
+def client():
+    qobuz_client = QobuzClient(Config.defaults())
+    yield qobuz_client
+    if hasattr(qobuz_client, "session") and qobuz_client.session is not None:
+        arun(qobuz_client.session.close())
 
 
 @pytest.fixture(scope="session")
@@ -31,10 +45,154 @@ def qobuz_client():
     arun(client.session.close())
 
 
-def test_client_raises_missing_credentials():
-    c = Config.defaults()
+def test_client_raises_missing_credentials(client):
     with pytest.raises(MissingCredentialsError):
-        arun(QobuzClient(c).login())
+        arun(client.login())
+
+
+def test_get_downloadable_requires_login(client):
+    with pytest.raises(AuthenticationError, match="not logged in"):
+        arun(client.get_downloadable("19512574", 3))
+
+
+def test_get_downloadable_requires_secret(client):
+    client.logged_in = True
+    with pytest.raises(InvalidAppSecretError, match="Missing validated"):
+        arun(client.get_downloadable("19512574", 3))
+
+
+def test_get_downloadable_invalid_quality(client):
+    client.logged_in = True
+    client.secret = "secret"
+    with pytest.raises(NonStreamableError, match="Unsupported Qobuz quality"):
+        arun(client.get_downloadable("19512574", 0))
+
+
+def test_get_downloadable_signing_failure_status_400(monkeypatch, client):
+    client.logged_in = True
+    client.secret = "secret"
+
+    async def fake_request_file_url(*_args, **_kwargs):
+        return 400, {"message": "Invalid request_sig"}
+
+    monkeypatch.setattr(client, "_request_file_url", fake_request_file_url)
+    with pytest.raises(NonStreamableError, match="signing failure"):
+        arun(client.get_downloadable("19512574", 3))
+
+
+def test_extract_bundle_urls_normalizes_and_filters_js_paths():
+    login_page = """
+    <html>
+      <script src="/resources/abc.bundle.js?v=1"></script>
+      <script src="//play.qobuz.com/resources/def.bundle.js?cache=2"></script>
+      <script src="https://cdn.qobuz.com/resources/ghi.bundle.js?x=3#hash"></script>
+      <script src="/resources/not-js.css?v=1"></script>
+      <script src="/app.bundle.js?v=1"></script>
+    </html>
+    """
+
+    assert QobuzSpoofer._extract_bundle_urls(login_page) == [
+        "https://play.qobuz.com/resources/abc.bundle.js?v=1",
+        "https://play.qobuz.com/resources/def.bundle.js?cache=2",
+        "https://cdn.qobuz.com/resources/ghi.bundle.js?x=3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_app_id_and_secrets_skips_empty_bundle_results():
+    spoofer = QobuzSpoofer()
+    spoofer.session = MagicMock()
+
+    login_resp = AsyncMock()
+    login_resp.text = AsyncMock(
+        return_value="<script src='/resources/a.bundle.js'></script>"
+    )
+    login_ctx = AsyncMock()
+    login_ctx.__aenter__.return_value = login_resp
+    login_ctx.__aexit__.return_value = False
+
+    first_bundle_resp = AsyncMock()
+    first_bundle_resp.text = AsyncMock(return_value="first")
+    first_ctx = AsyncMock()
+    first_ctx.__aenter__.return_value = first_bundle_resp
+    first_ctx.__aexit__.return_value = False
+
+    second_bundle_resp = AsyncMock()
+    second_bundle_resp.text = AsyncMock(return_value="second")
+    second_ctx = AsyncMock()
+    second_ctx.__aenter__.return_value = second_bundle_resp
+    second_ctx.__aexit__.return_value = False
+
+    spoofer.session.get.side_effect = [login_ctx, first_ctx, second_ctx]
+    spoofer._extract_bundle_urls = lambda _page: [
+        "https://play.qobuz.com/resources/one.bundle.js",
+        "https://play.qobuz.com/resources/two.bundle.js",
+    ]
+
+    calls = {"n": 0}
+
+    def _fake_extract(bundle):
+        """
+        Extract an app id and secrets list from a test bundle identifier.
+
+        Parameters:
+            bundle (str): Test bundle identifier; the function treats "first" specially.
+
+        Returns:
+            (app_id, secrets) (tuple): app_id is a string identifier; secrets is a list of secret strings (may be empty).
+        """
+        calls["n"] += 1
+        if bundle == "first":
+            return "123", []
+        return "456", ["secret"]
+
+    spoofer._extract_app_id_and_secrets_from_bundle = _fake_extract
+
+    app_id, secrets = await spoofer.get_app_id_and_secrets()
+    assert app_id == "456"
+    assert secrets == ["secret"]
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_paginate_batches_requests(monkeypatch, client):
+    calls = []
+
+    async def _fake_api_request(epoint, params):
+        """
+        Fake async API responder used in tests to simulate a paginated album search response.
+
+        Parameters:
+            epoint (str): API endpoint being requested (unused by the fake).
+            params (dict): Query parameters; `offset` may be provided to indicate page offset (defaults to 0).
+
+        Returns:
+            tuple: A (status_code, response_json) pair where `status_code` is 200 and `response_json` is a dict with an `albums` page:
+                - `items`: list containing a single item whose `id` equals the requested offset
+                - `total`: 1300
+                - `limit`: 100
+                - `offset`: the requested offset
+
+        Side effects:
+            Appends the effective `offset` value to the surrounding `calls` list.
+        """
+        calls.append(params.get("offset", 0))
+        offset = params.get("offset", 0)
+        return (
+            200,
+            {
+                "albums": {
+                    "items": [{"id": offset}],
+                    "total": 1300,
+                    "limit": 100,
+                    "offset": offset,
+                }
+            },
+        )
+
+    monkeypatch.setattr(client, "_api_request", _fake_api_request)
+    pages = await client._paginate("album/search", {"query": "x"}, limit=1300)
+    assert len(pages) == 13
 
 
 @pytest.mark.skipif(

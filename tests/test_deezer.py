@@ -135,6 +135,41 @@ def test_deezer_no_fallback_when_disabled(mock_deezer_client):
             arun(mock_deezer_client.get_downloadable("123", quality=2))
 
 
+def test_deezer_raises_actionable_error_on_track_lookup_failure(mock_deezer_client):
+    mock_deezer_client.client.gw.get_track.side_effect = RuntimeError("gateway timeout")
+
+    with pytest.raises(
+        NonStreamableError, match="Unable to query Deezer track metadata"
+    ):
+        arun(mock_deezer_client.get_downloadable("123", quality=2))
+
+
+def test_deezer_falls_back_to_encrypted_url_when_media_api_returns_none(
+    mock_deezer_client,
+):
+    mock_track_info = {
+        "FILESIZE_FLAC": 25000000,
+        "FILESIZE_MP3_320": 5000000,
+        "FILESIZE_MP3_128": 2000000,
+        "TRACK_TOKEN": "test_token",
+        "MD5_ORIGIN": "abcdef0123456789abcdef0123456789",
+        "MEDIA_VERSION": "1",
+    }
+
+    mock_deezer_client.client.gw.get_track.return_value = mock_track_info
+    mock_deezer_client.client.get_track_url.return_value = None
+
+    with patch.object(
+        mock_deezer_client,
+        "_get_encrypted_file_url",
+        return_value="https://e-cdns-proxy-a.dzcdn.net/mobile/1/abc",
+    ) as encrypted_url:
+        downloadable = arun(mock_deezer_client.get_downloadable("123", quality=2))
+
+    encrypted_url.assert_called_once()
+    assert downloadable.url.startswith("https://e-cdns-proxy")
+
+
 # ===== INTEGRATION TEST =====
 
 

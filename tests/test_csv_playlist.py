@@ -11,13 +11,16 @@ import pytest
 from streamrip.db import Database
 from streamrip.file_lists import ExportifyCsvRow
 from streamrip.media.csv_playlist import (
+    _MIN_ACCEPTABLE_SCORE,
     PendingCsvPlaylist,
     PendingCsvTrack,
     TrackCandidate,
     _build_quality_sequence,
+    _build_search_queries,
     _CandidateMeta,
     _chunks,
     _extract_raw_results,
+    _MetaFetchResult,
     _pick_best_candidate,
     _pick_best_candidate_repair,
 )
@@ -185,6 +188,32 @@ def test_extract_raw_results_empty_pages():
 
 
 # ---------------------------------------------------------------------------
+# query building
+# ---------------------------------------------------------------------------
+
+
+def test_build_search_queries_prioritizes_isrc_for_deezer_qobuz():
+    row = _make_row(
+        title="Track",
+        artists=["Artist A", "Artist B"],
+        album="Album",
+        date="2020-01-01",
+        isrc="USABC1234567",
+    )
+    deezer_queries = _build_search_queries(row, "deezer")
+    qobuz_queries = _build_search_queries(row, "qobuz")
+    assert deezer_queries[0] == ("isrc", "USABC1234567")
+    assert qobuz_queries[0] == ("isrc", "USABC1234567")
+    assert any(strategy == "generic" for strategy, _ in deezer_queries)
+
+
+def test_build_search_queries_non_target_provider_has_no_isrc_step():
+    row = _make_row(title="Track", artists=["Artist"], album="Album", isrc="USXYZ")
+    tidal_queries = _build_search_queries(row, "tidal")
+    assert tidal_queries[0][0] != "isrc"
+
+
+# ---------------------------------------------------------------------------
 # _pick_best_candidate
 # ---------------------------------------------------------------------------
 
@@ -300,8 +329,8 @@ async def test_pending_csv_track_primary_wins():
     async def _fake_try(self_arg, candidate, cached, quality):
         try_calls.append(candidate.source)
         if candidate.source == "qobuz":
-            return mock_track
-        return None
+            return mock_track, "ok"
+        return None, "quality unavailable"
 
     with (
         patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
@@ -351,8 +380,8 @@ async def test_pending_csv_track_fallback_used_when_primary_fails():
     async def _fake_try(self_arg, candidate, cached, quality):
         call_count[0] += 1
         if candidate.source == "qobuz":
-            return None  # primary fails
-        return mock_track  # fallback succeeds
+            return None, "quality unavailable"  # primary fails
+        return mock_track, "ok"  # fallback succeeds
 
     with (
         patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
@@ -361,8 +390,56 @@ async def test_pending_csv_track_fallback_used_when_primary_fails():
         result = await track.resolve()
 
     assert result is mock_track
-    # Should have tried both primary (qobuz) and fallback (deezer) at pass 0
+    # Pass-major fallback: try same pass index across services before stepping down.
     assert call_count[0] == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_track_pass_major_quality_then_service_order():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    fallback_client = _make_client("deezer")
+
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=_make_candidate("qobuz", primary_client, id="qobuz_id"),
+        fallback_candidate=_make_candidate("deezer", fallback_client, id="deezer_id"),
+        primary_qualities=[2, 1, 0],
+        fallback_qualities=[1, 0],
+        primary_source="qobuz",
+        fallback_source="deezer",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+
+    mock_meta = _CandidateMeta(resp={}, album=MagicMock(), meta=MagicMock())
+    attempts: list[tuple[str, int]] = []
+
+    async def _fake_fetch(self_arg, candidate):
+        return mock_meta
+
+    async def _fake_try(self_arg, candidate, cached, quality):
+        attempts.append((candidate.source, quality))
+        return None, "quality unavailable"
+
+    with (
+        patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
+        patch.object(PendingCsvTrack, "_try_candidate_with_meta", _fake_try),
+    ):
+        result = await track.resolve()
+
+    assert result is None
+    assert attempts == [
+        ("qobuz", 2),
+        ("deezer", 1),
+        ("qobuz", 1),
+        ("deezer", 0),
+        ("qobuz", 0),
+    ]
 
 
 @pytest.mark.asyncio
@@ -399,7 +476,9 @@ async def test_pending_csv_track_all_passes_fail_returns_none():
     with (
         patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
         patch.object(
-            PendingCsvTrack, "_try_candidate_with_meta", AsyncMock(return_value=None)
+            PendingCsvTrack,
+            "_try_candidate_with_meta",
+            AsyncMock(return_value=(None, "quality unavailable")),
         ),
     ):
         result = await track.resolve()
@@ -428,6 +507,55 @@ async def test_pending_csv_track_no_candidates_returns_none():
     )
     result = await track.resolve()
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_track_logs_attempt_trace_on_exhaustion(tmp_path):
+    db = _make_db()
+    from streamrip.db import UnresolvedQueryLog
+
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=_make_candidate("qobuz", primary_client, id="q1"),
+        fallback_candidate=None,
+        primary_qualities=[2, 1],
+        fallback_qualities=[],
+        primary_source="qobuz",
+        fallback_source="",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+
+    mock_meta = _CandidateMeta(resp={}, album=MagicMock(), meta=MagicMock())
+
+    async def _fake_fetch(self_arg, candidate):
+        return mock_meta
+
+    async def _fake_try(self_arg, candidate, cached, quality):
+        if quality == 2:
+            return None, "quality unavailable"
+        return None, "download failed"
+
+    with (
+        patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
+        patch.object(PendingCsvTrack, "_try_candidate_with_meta", _fake_try),
+    ):
+        assert await track.resolve() is None
+
+    with open(unresolved_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "attempt_trace" in content
+    assert "qobuz@2:quality unavailable" in content
+    assert "qobuz@1:download failed" in content
+    assert "download attempt failed after a valid service/quality match" in content
 
 
 @pytest.mark.asyncio
@@ -650,6 +778,110 @@ async def test_pending_csv_playlist_one_row_exception_continues():
     # The test passes if no exception is raised
 
 
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_low_confidence_result_marked_unresolved(tmp_path):
+    db = _make_db()
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    from streamrip.db import UnresolvedQueryLog
+
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    primary_client.search = AsyncMock(
+        return_value=[
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "id": 10,
+                            "title": "Blue in Green (Live)",
+                            "performer": {"name": "Wrong Artist"},
+                            "album": {"title": "Other Album"},
+                            "isrc": "",
+                            "release_date_original": "2010",
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[
+            _make_row(
+                title="Blue in Green",
+                artists=["Miles Davis"],
+                album="Kind of Blue",
+                date="1959",
+            )
+        ],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+
+    with patch.dict("os.environ", {"STREAMRIP_COUNTRY_CODE": "US"}):
+        result = await pending.resolve()
+    assert result is None
+    # Ensure this really is below configured confidence floor
+    from streamrip.file_lists import score_candidate
+
+    assert (
+        score_candidate(
+            _make_row(
+                title="Blue in Green",
+                artists=["Miles Davis"],
+                album="Kind of Blue",
+                date="1959",
+            ),
+            "Blue in Green (Live)",
+            "Wrong Artist",
+            "Other Album",
+            "2010",
+            "",
+        )
+        < _MIN_ACCEPTABLE_SCORE
+    )
+
+    with open(unresolved_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "low confidence" in content
+    assert "query_strategy" in content
+    assert "attempted_query" in content
+    assert ",US," in content
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_search_errors_are_logged_as_search_failed(tmp_path):
+    db = _make_db()
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    from streamrip.db import UnresolvedQueryLog
+
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(side_effect=RuntimeError("provider timeout"))
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[_make_row()],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+
+    result = await pending.resolve()
+    assert result is None
+
+    with open(unresolved_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "search_failed" in content
+
+
 # ---------------------------------------------------------------------------
 # Regression: existing Deezer non-CSV flows unchanged
 # ---------------------------------------------------------------------------
@@ -709,12 +941,28 @@ async def test_metadata_fetched_once_per_candidate_across_quality_passes():
     fetch_calls: list[str] = []
 
     async def _fake_fetch(self_arg, candidate):
+        """
+        Record the candidate's source and return a successful metadata fetch result with mocked metadata.
+
+        Parameters:
+            self_arg: Unused; preserved to match the original method signature.
+            candidate: The track candidate whose `source` will be appended to `fetch_calls`.
+
+        Returns:
+            _MetaFetchResult: An object with `status="ok"` and `meta` set to `mock_meta`.
+        """
         fetch_calls.append(candidate.source)
-        return mock_meta
+        return _MetaFetchResult(status="ok", meta=mock_meta)
 
     async def _fake_try(self_arg, candidate, cached, quality):
         # Always fail so all quality passes are exhausted
-        return None
+        """
+        Simulate a failed candidate attempt so all quality passes are treated as exhausted.
+
+        Returns:
+            (None, str): A two-tuple where the first element is `None` (no track) and the second is the failure reason; specifically `"quality unavailable"`.
+        """
+        return None, "quality unavailable"
 
     with (
         patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
@@ -731,8 +979,8 @@ async def test_metadata_fetched_once_per_candidate_across_quality_passes():
 
 @pytest.mark.asyncio
 async def test_metadata_fetch_failure_skips_candidate_quality_passes():
-    """If _fetch_candidate_meta returns None for a candidate, all its quality
-    passes must be skipped — the other candidate is still tried."""
+    """If metadata fetch is unavailable for one candidate, its quality passes
+    must be skipped — the other candidate is still tried."""
     db = _make_db()
     cfg = _make_config()
     primary_client = _make_client("qobuz")
@@ -760,12 +1008,34 @@ async def test_metadata_fetch_failure_skips_candidate_quality_passes():
     )
 
     async def _fake_fetch(self_arg, candidate):
+        """
+        Simulate fetching metadata for a candidate in tests, returning a deterministic _MetaFetchResult.
+
+        Parameters:
+            candidate: The candidate whose `source` determines the simulated outcome.
+
+        Returns:
+            _MetaFetchResult: For candidates from `"qobuz"`, a result with `status="matched unavailable"`.
+            For all other sources, a result with `status="ok"` and `meta` set to `mock_meta`.
+        """
         if candidate.source == "qobuz":
-            return None  # primary metadata unavailable
-        return mock_meta  # fallback metadata OK
+            return _MetaFetchResult(status="matched unavailable")
+        return _MetaFetchResult(status="ok", meta=mock_meta)
 
     async def _fake_try(self_arg, candidate, cached, quality):
-        return mock_track  # fallback succeeds at first quality
+        """
+        Simulate attempting a candidate and always succeed for the first quality pass.
+
+        Parameters:
+            self_arg: Placeholder for bound method `self` (unused).
+            candidate: Candidate being attempted (ignored by this fake).
+            cached: Cached metadata/state for the candidate (ignored).
+            quality: Quality level being attempted (ignored).
+
+        Returns:
+            tuple: (track, status) where `track` is the mocked track returned to signal success and `status` is the string `"ok"`.
+        """
+        return mock_track, "ok"  # fallback succeeds at first quality
 
     with (
         patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch),
@@ -775,6 +1045,50 @@ async def test_metadata_fetch_failure_skips_candidate_quality_passes():
 
     # Fallback must have been used since primary metadata failed
     assert result is mock_track
+
+
+@pytest.mark.asyncio
+async def test_metadata_fetch_provider_error_not_classified_as_unavailable(tmp_path):
+    db = _make_db()
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    from streamrip.db import UnresolvedQueryLog
+
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    primary_cand = _make_candidate("qobuz", primary_client, id="q1")
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=primary_cand,
+        fallback_candidate=None,
+        primary_qualities=[2, 1, 0],
+        fallback_qualities=[],
+        primary_source="qobuz",
+        fallback_source="",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+
+    async def _fake_fetch(_self_arg, _candidate):
+        """
+        Simulate a metadata fetch that fails with a provider-level error.
+
+        Returns:
+            _MetaFetchResult: An instance with `status` set to `"provider-error"`.
+        """
+        return _MetaFetchResult(status="provider-error")
+
+    with patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch):
+        result = await track.resolve()
+
+    assert result is None
+    with open(unresolved_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "provider error while resolving matched candidate metadata" in content
 
 
 # ---------------------------------------------------------------------------
@@ -834,8 +1148,8 @@ def test_pick_best_candidate_repair_uses_fuzzy_when_exact_fails():
 
 
 def test_score_candidate_repair_fuzzy_path_activates_when_exact_fails():
-    """score_candidate_repair must return a non-zero score via fuzzy matching
-    when the exact title normalisation returns 0 but similarity >= 0.80."""
+    """Repair scorer should not regress when standard scorer already handles
+    remaster-style variants."""
     from streamrip.file_lists import (
         ExportifyCsvRow,
         score_candidate,
@@ -857,7 +1171,7 @@ def test_score_candidate_repair_fuzzy_path_activates_when_exact_fails():
         row_index=0,
     )
 
-    # "(Remaster)" suffix means normalised titles differ; SequenceMatcher ratio ~0.816 > 0.80
+    # "(Remaster)" suffix is handled in standard scoring via variant normalisation.
     candidate_title = "Something in the Way (Remaster)"
     candidate_artist = "Nirvana"
     candidate_album = "Nevermind"
@@ -881,10 +1195,8 @@ def test_score_candidate_repair_fuzzy_path_activates_when_exact_fails():
         candidate_isrc,
     )
 
-    # Standard scorer fails on exact title match
-    assert std_score == 0, f"Expected std_score=0, got {std_score}"
-    # Repair scorer succeeds via fuzzy fallback (ratio ~0.816 >= 0.80)
-    assert repair_score > 0, f"Expected repair_score>0, got {repair_score}"
+    assert std_score > 0
+    assert repair_score == std_score
 
 
 def test_pick_best_candidate_repair_rejects_low_similarity():
@@ -968,6 +1280,71 @@ async def test_repair_mode_uses_expanded_search_limit():
 
 
 @pytest.mark.asyncio
+async def test_repair_mode_tries_candidate_id_hint_before_search():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    row = _make_row(row_index=0)
+    row.repair_candidate_ids = {"qobuz": "hinted-id"}
+
+    primary_client.get_metadata = AsyncMock(
+        return_value={
+            "id": "hinted-id",
+            "title": "Song",
+            "performer": {"name": "Artist"},
+            "album": {"title": "Album"},
+            "release_date_original": "2020-01-01",
+            "isrc": "",
+        }
+    )
+    primary_client.search = AsyncMock(return_value=[])
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+        repair_mode=True,
+    )
+
+    await pending.resolve()
+
+    primary_client.get_metadata.assert_awaited_once_with("hinted-id", "track")
+    primary_client.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_repair_mode_falls_back_to_search_when_candidate_id_hint_fails():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    row = _make_row(row_index=0)
+    row.repair_candidate_ids = {"qobuz": "stale-id"}
+
+    primary_client.get_metadata = AsyncMock(side_effect=Exception("not found"))
+    primary_client.search = AsyncMock(return_value=[])
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+        repair_mode=True,
+    )
+
+    await pending.resolve()
+
+    primary_client.get_metadata.assert_awaited_once_with("stale-id", "track")
+    primary_client.search.assert_called()
+
+
+@pytest.mark.asyncio
 async def test_normal_mode_uses_standard_search_limit():
     """In normal mode (repair_mode=False), the standard _SEARCH_LIMIT is used."""
     import streamrip.media.csv_playlist as csv_mod
@@ -1027,6 +1404,8 @@ def test_parse_unresolved_csv_round_trip(tmp_path):
         spotify_uri="spotify:track:abc123",
         primary_source="qobuz",
         fallback_source="deezer",
+        primary_candidate_id="1234",
+        fallback_candidate_id="5678",
         reason="all quality/service combinations failed",
         row_index=0,
     )
@@ -1055,10 +1434,12 @@ def test_parse_unresolved_csv_round_trip(tmp_path):
     assert row0.release_date == "1959"
     assert row0.isrc == "US-ABC-12-34567"
     assert row0.spotify_uri == "spotify:track:abc123"
+    assert row0.repair_candidate_ids == {"qobuz": "1234", "deezer": "5678"}
 
     row1 = rows[1]
     assert row1.track_name == "So What"
     assert row1.isrc == ""
+    assert row1.repair_candidate_ids is None
 
 
 def test_parse_unresolved_csv_empty_file(tmp_path):
@@ -1071,6 +1452,23 @@ def test_parse_unresolved_csv_empty_file(tmp_path):
 
     rows = parse_unresolved_csv(log_path)
     assert rows == []
+
+
+def test_unresolved_query_log_rotates_when_header_schema_mismatch(tmp_path):
+    from streamrip.db import UnresolvedQueryLog
+
+    log_path = tmp_path / "legacy_unresolved.csv"
+    log_path.write_text("legacy_header_a,legacy_header_b\nv1,v2\n", encoding="utf-8")
+
+    log = UnresolvedQueryLog(str(log_path))
+    assert log.has_entries is False
+
+    backups = list(tmp_path.glob("legacy_unresolved.csv.*.bak"))
+    assert len(backups) == 1
+
+    with open(log_path, encoding="utf-8") as fh:
+        header = fh.readline().strip()
+    assert header == ",".join(UnresolvedQueryLog.FIELDNAMES)
 
 
 @pytest.mark.asyncio
@@ -1135,3 +1533,126 @@ async def test_repair_csv_main_method(tmp_path):
     # One row was parsed from the log
     assert len(call["rows"]) == 1
     assert call["rows"][0].track_name == "Blue in Green"
+
+
+@pytest.mark.asyncio
+async def test_repair_csv_prioritizes_availability_rows_when_country_changes(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    from streamrip.rip.main import Main
+
+    log_path = str(tmp_path / "liked_songs_unresolved.csv")
+    with open(log_path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(
+            "timestamp,track_name,artists,album,release_date,isrc,spotify_uri,"
+            "primary_source,fallback_source,reason,row_index,session_country,"
+            "query_strategy,attempted_query,attempt_trace\n"
+        )
+        # row 0: low confidence (normal priority)
+        fh.write(
+            "2026-01-01T00:00:00Z,Track A,Artist,Album,2020,,,"
+            "qobuz,deezer,low confidence (20<50),0,US,structured,qA,\n"
+        )
+        # row 1: catalog availability + previous country FR (should be prioritized if now US)
+        fh.write(
+            "2026-01-01T00:00:00Z,Track B,Artist,Album,2020,,,"
+            "qobuz,deezer,matched item found; unavailable on current service,1,FR,"
+            "structured,qB,\n"
+        )
+
+    config = MagicMock()
+    config.session.downloads.requests_per_minute = 0
+    config.session.database.downloads_enabled = False
+    config.session.database.failed_downloads_enabled = False
+    config.session.reliability.fail_fast = False
+
+    with (
+        patch("streamrip.rip.main.QobuzClient"),
+        patch("streamrip.rip.main.TidalClient"),
+        patch("streamrip.rip.main.DeezerClient"),
+        patch("streamrip.rip.main.SoundcloudClient"),
+        patch.dict("os.environ", {"STREAMRIP_COUNTRY_CODE": "US"}),
+    ):
+        main = Main(config)
+        resolve_calls = []
+
+        async def _fake_resolve_csv(**kwargs):
+            resolve_calls.append(kwargs)
+
+        main.resolve_csv = _fake_resolve_csv
+        await main.repair_csv(
+            unresolved_csv_path=log_path,
+            source="qobuz",
+            fallback_source="deezer",
+        )
+
+    assert len(resolve_calls) == 1
+    ordered = resolve_calls[0]["rows"]
+    assert ordered[0].track_name == "Track B"
+    assert ordered[1].track_name == "Track A"
+
+
+@pytest.mark.asyncio
+async def test_repair_csv_prioritizes_no_results_reasons(tmp_path):
+    """
+    Ensure Main.repair_csv processes unresolved rows so entries with reason "no results" are ordered before those with "metadata mismatch".
+
+    Writes a two-row unresolved CSV (one "metadata mismatch", one "no results"), invokes Main.repair_csv with qobuz primary and deezer fallback, and asserts the rows passed to resolve_csv are ordered with the "no results" row first.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from streamrip.rip.main import Main
+
+    log_path = str(tmp_path / "liked_songs_unresolved.csv")
+    with open(log_path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(
+            "timestamp,track_name,artists,album,release_date,isrc,spotify_uri,"
+            "primary_source,fallback_source,reason,row_index,session_country,"
+            "query_strategy,attempted_query,attempt_trace\n"
+        )
+        fh.write(
+            "2026-01-01T00:00:00Z,Track C,Artist,Album,2020,,,"
+            "qobuz,deezer,metadata mismatch,0,US,structured,qC,\n"
+        )
+        fh.write(
+            "2026-01-01T00:00:00Z,Track D,Artist,Album,2020,,,"
+            "qobuz,deezer,no results,1,US,structured,qD,\n"
+        )
+
+    config = MagicMock()
+    config.session.downloads.requests_per_minute = 0
+    config.session.database.downloads_enabled = False
+    config.session.database.failed_downloads_enabled = False
+    config.session.reliability.fail_fast = False
+
+    with (
+        patch("streamrip.rip.main.QobuzClient"),
+        patch("streamrip.rip.main.TidalClient"),
+        patch("streamrip.rip.main.DeezerClient"),
+        patch("streamrip.rip.main.SoundcloudClient"),
+    ):
+        main = Main(config)
+        resolve_calls = []
+
+        async def _fake_resolve_csv(**kwargs):
+            """
+            Record invocation arguments for a test double that simulates CSV resolution.
+
+            Appends all keyword arguments received to the shared `resolve_calls` list so tests can inspect how the resolver was invoked.
+
+            Parameters:
+                **kwargs: Arbitrary keyword arguments representing the invocation details to record.
+            """
+            resolve_calls.append(kwargs)
+
+        main.resolve_csv = _fake_resolve_csv
+        await main.repair_csv(
+            unresolved_csv_path=log_path,
+            source="qobuz",
+            fallback_source="deezer",
+        )
+
+    assert len(resolve_calls) == 1
+    ordered = resolve_calls[0]["rows"]
+    assert ordered[0].track_name == "Track D"
+    assert ordered[1].track_name == "Track C"

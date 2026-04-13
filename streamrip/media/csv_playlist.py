@@ -60,6 +60,16 @@ _SEARCH_LIMIT = 5
 
 # Expanded search window used in repair mode for heavier matching
 _REPAIR_SEARCH_LIMIT = 15
+_MIN_ACCEPTABLE_SCORE = 50
+_MIN_ACCEPTABLE_SCORE_REPAIR = 30
+
+
+def _session_country_hint() -> str:
+    """Best-effort country hint for unresolved CSV diagnostics.
+
+    This is intentionally lightweight/non-networked. If unset, returns empty.
+    """
+    return (os.getenv("STREAMRIP_COUNTRY_CODE") or "").strip().upper()
 
 
 @dataclass(slots=True)
@@ -75,6 +85,14 @@ class TrackCandidate:
     isrc: str
     score: int
     client: Client
+
+
+@dataclass(slots=True)
+class ResolverOutcome:
+    candidate: TrackCandidate | None
+    reason: str
+    query: str
+    strategy: str
 
 
 def _build_quality_sequence(source: str, max_quality: int) -> list[int]:
@@ -149,6 +167,44 @@ def _item_isrc(source: str, item: dict) -> str:
     return (item.get("isrc") or "").strip()
 
 
+def _build_search_queries(row: ExportifyCsvRow, source: str) -> list[tuple[str, str]]:
+    """Build deterministic layered queries for Exportify row resolution.
+
+    Returns ``[(strategy, query), ...]`` in priority order:
+    1) ISRC-led (when available) for Deezer/Qobuz.
+    2) Structured title + multiple artists + album/year hints.
+    3) Generic fallback (legacy behaviour shape).
+    """
+    artist_joined = (
+        " ".join(row.artists_list[:3]) if row.artists_list else row.artists_raw
+    )
+    year = row.release_date[:4].strip() if row.release_date else ""
+
+    queries: list[tuple[str, str]] = []
+    if row.isrc and source in {"deezer", "qobuz"}:
+        queries.append(("isrc", row.isrc))
+
+    structured_parts = [row.track_name, artist_joined, row.album, year]
+    structured = " ".join(p for p in structured_parts if p).strip()
+    if structured:
+        queries.append(("structured", structured))
+
+    generic = f"{row.track_name} {row.artists_list[0] if row.artists_list else row.artists_raw}".strip()
+    if generic:
+        queries.append(("generic", generic))
+
+    # De-dupe while preserving deterministic order.
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for strategy, query in queries:
+        qn = " ".join(query.split())
+        key = f"{strategy}:{qn}"
+        if qn and key not in seen:
+            seen.add(key)
+            out.append((strategy, qn))
+    return out
+
+
 def _pick_best_candidate(
     row: ExportifyCsvRow,
     source: str,
@@ -157,8 +213,7 @@ def _pick_best_candidate(
 ) -> TrackCandidate | None:
     """Score all results from *pages* and return the best :class:`TrackCandidate`.
 
-    Returns ``None`` if *pages* is empty or all items score 0 and the first
-    result is also unavailable.
+    Returns ``None`` if *pages* is empty.
     """
     items = _extract_raw_results(source, pages)
     if not items:
@@ -179,7 +234,7 @@ def _pick_best_candidate(
             best_score = sc
             best_item = item
 
-    if best_item is None:
+    if best_item is None or best_score <= 0:
         return None
 
     return TrackCandidate(
@@ -240,6 +295,14 @@ def _pick_best_candidate_repair(
         score=best_score,
         client=client,
     )
+
+
+def _candidate_reason(candidate: TrackCandidate | None, min_score: int) -> str:
+    if candidate is None:
+        return "no results"
+    if candidate.score < min_score:
+        return f"low confidence ({candidate.score}<{min_score})"
+    return "matched"
 
 
 def _build_extra_tags(
@@ -310,6 +373,19 @@ class _CandidateMeta:
 
 
 @dataclass(slots=True)
+class _MetaFetchResult:
+    status: str
+    meta: _CandidateMeta | None = None
+
+
+@dataclass(slots=True)
+class AttemptResult:
+    source: str
+    quality: int
+    status: str
+
+
+@dataclass(slots=True)
 class PendingCsvTrack(Pending):
     """A track derived from an Exportify CSV row, ready to resolve and download.
 
@@ -368,55 +444,87 @@ class PendingCsvTrack(Pending):
                 return None
 
         # --- Fetch metadata for each candidate exactly once ---
-        primary_meta: _CandidateMeta | None = None
-        fallback_meta: _CandidateMeta | None = None
+        primary_fetch = _MetaFetchResult(status="no-candidate")
+        fallback_fetch = _MetaFetchResult(status="no-candidate")
 
         if self.primary_candidate is not None:
-            primary_meta = await self._fetch_candidate_meta(self.primary_candidate)
+            primary_fetch = await self._fetch_candidate_meta(self.primary_candidate)
 
         if self.fallback_candidate is not None:
-            fallback_meta = await self._fetch_candidate_meta(self.fallback_candidate)
+            fallback_fetch = await self._fetch_candidate_meta(self.fallback_candidate)
 
-        # If metadata could not be fetched for a candidate it is treated as unavailable.
-        effective_primary = self.primary_candidate if primary_meta is not None else None
-        effective_fallback = (
-            self.fallback_candidate if fallback_meta is not None else None
+        attempts: list[AttemptResult] = []
+
+        effective_primary = (
+            self.primary_candidate
+            if self.primary_candidate is not None and primary_fetch.meta is not None
+            else None
         )
+        effective_fallback = (
+            self.fallback_candidate
+            if self.fallback_candidate is not None and fallback_fetch.meta is not None
+            else None
+        )
+
+        if self.primary_candidate is not None and primary_fetch.meta is None:
+            attempts.append(
+                AttemptResult(self.primary_source, -1, primary_fetch.status)
+            )
+        if self.fallback_candidate is not None and fallback_fetch.meta is None:
+            attempts.append(
+                AttemptResult(self.fallback_source, -1, fallback_fetch.status)
+            )
 
         max_passes = max(
             len(self.primary_qualities) if effective_primary else 0,
             len(self.fallback_qualities) if effective_fallback else 0,
         )
 
+        # Pass-major fallback (quality-prioritised): each pass tries the same
+        # quality-step index across configured services before stepping down.
         for pass_idx in range(max_passes):
-            # --- Try primary service at this pass's quality ---
             if effective_primary and pass_idx < len(self.primary_qualities):
-                assert primary_meta is not None  # guaranteed above
-                track = await self._try_candidate_with_meta(
+                assert primary_fetch.meta is not None
+                quality = self.primary_qualities[pass_idx]
+                track, status = await self._try_candidate_with_meta(
                     effective_primary,
-                    primary_meta,
-                    self.primary_qualities[pass_idx],
+                    primary_fetch.meta,
+                    quality,
+                )
+                attempts.append(
+                    AttemptResult(effective_primary.source, quality, status)
                 )
                 if track is not None:
+                    logger.info(
+                        "Resolved '%s' via %s at quality %d",
+                        self.row.track_name,
+                        effective_primary.source,
+                        quality,
+                    )
                     return track
 
-            # --- Try fallback service at this pass's quality ---
             if effective_fallback and pass_idx < len(self.fallback_qualities):
-                assert fallback_meta is not None  # guaranteed above
-                track = await self._try_candidate_with_meta(
+                assert fallback_fetch.meta is not None
+                quality = self.fallback_qualities[pass_idx]
+                track, status = await self._try_candidate_with_meta(
                     effective_fallback,
-                    fallback_meta,
-                    self.fallback_qualities[pass_idx],
+                    fallback_fetch.meta,
+                    quality,
+                )
+                attempts.append(
+                    AttemptResult(effective_fallback.source, quality, status)
                 )
                 if track is not None:
+                    logger.info(
+                        "Resolved '%s' via %s at quality %d",
+                        self.row.track_name,
+                        effective_fallback.source,
+                        quality,
+                    )
                     return track
 
         # All passes exhausted
-        reason = (
-            "no candidate found"
-            if (self.primary_candidate is None and self.fallback_candidate is None)
-            else "all quality/service combinations failed"
-        )
+        reason = self._classify_failure(attempts)
 
         logger.warning(
             "Could not download '%s' by %s (%s)",
@@ -435,21 +543,75 @@ class PendingCsvTrack(Pending):
                 spotify_uri=self.row.spotify_uri,
                 primary_source=self.primary_source,
                 fallback_source=self.fallback_source,
+                primary_candidate_id=(
+                    self.primary_candidate.id if self.primary_candidate else ""
+                ),
+                fallback_candidate_id=(
+                    self.fallback_candidate.id if self.fallback_candidate else ""
+                ),
                 reason=reason,
                 row_index=self.row.row_index,
+                session_country=_session_country_hint(),
+                attempt_trace=" | ".join(
+                    f"{a.source}@{a.quality}:{a.status}" for a in attempts
+                ),
             )
 
         return None
 
+    @staticmethod
+    def _classify_failure(attempts: list[AttemptResult]) -> str:
+        """
+        Classify a list of attempt results into a human-readable failure category.
+
+        Parameters:
+            attempts (list[AttemptResult]): Sequence of attempted (service, quality) attempts with their `status` strings.
+
+        Returns:
+            str: A failure category describing why resolution/download did not succeed. Possible categories include:
+            - "all configured service/quality combinations exhausted"
+            - "matched item found, but unavailable on current service"
+            - "download attempt failed after a valid service/quality match"
+            - "matched item available, but requested/highest quality unavailable"
+            - "provider error while resolving matched candidate metadata"
+            - "metadata processing error for matched candidate"
+            - "matched candidate already downloaded in concurrent run"
+        """
+        if not attempts:
+            return "all configured service/quality combinations exhausted"
+        statuses = {a.status for a in attempts}
+        if statuses == {"matched unavailable"}:
+            return "matched item found, but unavailable on current service"
+        if "download failed" in statuses:
+            return "download attempt failed after a valid service/quality match"
+        if "quality unavailable" in statuses:
+            return "matched item available, but requested/highest quality unavailable"
+        if "provider-error" in statuses:
+            return "provider error while resolving matched candidate metadata"
+        if "metadata-error" in statuses:
+            return "metadata processing error for matched candidate"
+        if "duplicate-race" in statuses:
+            return "matched candidate already downloaded in concurrent run"
+        return "all configured service/quality combinations exhausted"
+
     async def _fetch_candidate_meta(
         self,
         candidate: TrackCandidate,
-    ) -> _CandidateMeta | None:
-        """Fetch and build metadata for *candidate*.  Returns ``None`` on any failure.
+    ) -> _MetaFetchResult:
+        """
+        Fetch and assemble metadata for a single track candidate and return a structured outcome status.
 
-        This is called **once per candidate** before the quality loop so that
-        subsequent quality passes can reuse the cached result without repeating
-        the API call.
+        Performs a single metadata retrieval and constructs album and track metadata; callers should cache the result and reuse it across quality attempts. The returned _MetaFetchResult.status is one of:
+        - "ok": metadata successfully fetched and parsed; `_MetaFetchResult.meta` contains the constructed `_CandidateMeta`.
+        - "duplicate-race": candidate was already recorded as downloaded in the database; no metadata returned.
+        - "provider-error": the provider request failed or raised an unexpected error; no metadata returned.
+        - "matched unavailable": the provider response indicates the track or album is not streamable/available; no metadata returned.
+        - "metadata-error": the provider response could not be converted into required TrackMetadata; no metadata returned.
+
+        On success, the returned `_MetaFetchResult.meta` holds:
+        - `resp`: raw provider response,
+        - `album`: `AlbumMetadata` built from the response,
+        - `meta`: `TrackMetadata` built from the response (may include configuration-driven adjustments and best-effort extra tags).
         """
         # Source-aware duplicate check (inner safety net for concurrent downloads)
         if self.db.downloaded(candidate.id, source=candidate.source):
@@ -459,7 +621,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
             )
             self.db.set_skipped()
-            return None
+            return _MetaFetchResult(status="duplicate-race")
 
         try:
             resp = await candidate.client.get_metadata(candidate.id, "track")
@@ -470,7 +632,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return _MetaFetchResult(status="provider-error")
         except Exception as e:
             logger.debug(
                 "Unexpected error fetching metadata for %s:%s: %s",
@@ -478,7 +640,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return _MetaFetchResult(status="provider-error")
 
         album = AlbumMetadata.from_track_resp(resp, candidate.source)
         if album is None:
@@ -488,7 +650,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 candidate.source,
             )
-            return None
+            return _MetaFetchResult(status="matched unavailable")
 
         meta = TrackMetadata.from_resp(album, candidate.source, resp)
         if meta is None:
@@ -497,7 +659,7 @@ class PendingCsvTrack(Pending):
                 candidate.source,
                 candidate.id,
             )
-            return None
+            return _MetaFetchResult(status="metadata-error")
 
         c = self.config.session.metadata
         if c.renumber_playlist_tracks:
@@ -516,18 +678,31 @@ class PendingCsvTrack(Pending):
             except Exception as e:
                 logger.warning("Failed to build extra tags for '%s': %s", meta.title, e)
 
-        return _CandidateMeta(resp=resp, album=album, meta=meta)
+        return _MetaFetchResult(
+            status="ok",
+            meta=_CandidateMeta(resp=resp, album=album, meta=meta),
+        )
 
     async def _try_candidate_with_meta(
         self,
         candidate: TrackCandidate,
         cached: _CandidateMeta,
         quality: int,
-    ) -> Track | None:
-        """Attempt to obtain a downloadable for *candidate* at *quality*.
+    ) -> tuple[Track | None, str]:
+        """
+        Try to produce a downloadable Track for the given candidate using already-fetched metadata.
 
-        Uses pre-fetched metadata from *cached* — no additional API call is made.
-        Returns a :class:`Track` on success, ``None`` if the quality is unavailable.
+        Parameters:
+            candidate (TrackCandidate): Candidate identifying source and track id.
+            cached (_CandidateMeta): Cached per-candidate metadata (album, track metadata, raw response) previously obtained.
+            quality (int): Desired quality step to request from the provider.
+
+        Returns:
+            tuple[Track | None, str]: A pair of (track, status). `track` is a Track object on success, `None` otherwise.
+            `status` is one of:
+              - `"ok"`: downloadable obtained and Track constructed,
+              - `"quality unavailable"`: provider indicated the requested quality cannot be streamed,
+              - `"download failed"`: other error occurred while obtaining the downloadable.
         """
         # Attempt download at the requested quality.
         # Pass exact_quality=True for Deezer so the caller controls stepping.
@@ -553,7 +728,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return None, "quality unavailable"
         except Exception as e:
             logger.debug(
                 "Error getting downloadable for %s:%s: %s",
@@ -561,15 +736,18 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return None, "download failed"
 
-        return Track(
-            cached.meta,
-            downloadable,
-            self.config,
-            self.folder,
-            embedded_cover_path,
-            self.db,
+        return (
+            Track(
+                cached.meta,
+                downloadable,
+                self.config,
+                self.folder,
+                embedded_cover_path,
+                self.db,
+            ),
+            "ok",
         )
 
     async def _download_cover(self, covers: Covers, client: Client) -> str | None:
@@ -746,57 +924,173 @@ class PendingCsvPlaylist(Pending):
         - Uses :func:`_pick_best_candidate_repair` which applies fuzzy title
           matching as a fallback when exact title matching fails.
         """
-        query = f"{row.track_name} {row.artists_list[0] if row.artists_list else row.artists_raw}"
-
         search_limit = _REPAIR_SEARCH_LIMIT if self.repair_mode else _SEARCH_LIMIT
         picker = (
             _pick_best_candidate_repair if self.repair_mode else _pick_best_candidate
         )
+        min_score = (
+            _MIN_ACCEPTABLE_SCORE_REPAIR if self.repair_mode else _MIN_ACCEPTABLE_SCORE
+        )
 
-        primary_candidate: TrackCandidate | None = None
-        fallback_candidate: TrackCandidate | None = None
+        primary_outcome = ResolverOutcome(None, "no results", "", "")
+        fallback_outcome = ResolverOutcome(None, "no results", "", "")
 
-        # Search primary service
-        try:
-            primary_pages = await self.primary_client.search(
-                "track", query, limit=search_limit
+        async def _resolve_for_client(client: Client) -> ResolverOutcome:
+            """
+            Resolve the best TrackCandidate for a single client by optionally using an ID hint and then running layered search queries.
+
+            Attempts an optional per-service ID hint (when repair mode and a hint exist); if that yields an acceptable match (score >= min_score) it is returned immediately. Otherwise runs the deterministic layered queries in order, scoring results with the configured picker and returning the first candidate that meets the minimum score. If no candidate meets the threshold the highest-scoring low-confidence candidate seen is returned. If any search invocation raised an exception and no candidate was selected, the outcome reason is `"search_failed"`. If no results were found and no errors occurred, the outcome reason is `"no results"`.
+
+            Returns:
+                ResolverOutcome: Outcome with:
+                  - candidate: the selected TrackCandidate or `None` if none found,
+                  - reason: one of `"matched"`, `"low confidence (score<min_score)"`, `"search_failed"`, or `"no results"`,
+                  - query: the query string that produced the returned candidate (or the last attempted query on failure),
+                  - strategy: the query strategy that produced the returned candidate (or the last attempted strategy on failure).
+            """
+            queries = _build_search_queries(row, client.source)
+            best_low_conf: tuple[str, str, TrackCandidate] | None = None
+            had_error = False
+            last_query = ""
+            last_strategy = ""
+
+            hinted_id = ""
+            if self.repair_mode and row.repair_candidate_ids:
+                hinted_id = (row.repair_candidate_ids.get(client.source) or "").strip()
+
+            if hinted_id:
+                try:
+                    hinted_resp = await client.get_metadata(hinted_id, "track")
+                    hinted_candidate = TrackCandidate(
+                        source=client.source,
+                        id=str(hinted_resp.get("id", hinted_id)),
+                        title=_item_title(client.source, hinted_resp),
+                        artist=_item_artist(client.source, hinted_resp),
+                        album=_item_album(client.source, hinted_resp),
+                        release_date=_item_date(client.source, hinted_resp),
+                        isrc=_item_isrc(client.source, hinted_resp),
+                        score=(
+                            score_candidate_repair(
+                                row,
+                                _item_title(client.source, hinted_resp),
+                                _item_artist(client.source, hinted_resp),
+                                _item_album(client.source, hinted_resp),
+                                _item_date(client.source, hinted_resp),
+                                _item_isrc(client.source, hinted_resp),
+                            )
+                            if self.repair_mode
+                            else score_candidate(
+                                row,
+                                _item_title(client.source, hinted_resp),
+                                _item_artist(client.source, hinted_resp),
+                                _item_album(client.source, hinted_resp),
+                                _item_date(client.source, hinted_resp),
+                                _item_isrc(client.source, hinted_resp),
+                            )
+                        ),
+                        client=client,
+                    )
+                    reason = _candidate_reason(hinted_candidate, min_score)
+                    if reason == "matched":
+                        return ResolverOutcome(
+                            candidate=hinted_candidate,
+                            reason=reason,
+                            query=hinted_id,
+                            strategy="id-hint",
+                        )
+                    best_low_conf = (hinted_id, "id-hint", hinted_candidate)
+                except Exception as e:
+                    logger.debug(
+                        "Hinted metadata lookup failed on %s id=%s: %s",
+                        client.source,
+                        hinted_id,
+                        e,
+                    )
+
+            for strategy, query in queries:
+                last_query = query
+                last_strategy = strategy
+                try:
+                    pages = await client.search("track", query, limit=search_limit)
+                    candidate = picker(row, client.source, pages, client)
+                except Exception as e:
+                    had_error = True
+                    logger.debug(
+                        "Search failed on %s (%s) for '%s': %s",
+                        client.source,
+                        strategy,
+                        query,
+                        e,
+                    )
+                    continue
+
+                reason = _candidate_reason(candidate, min_score)
+                if reason == "matched":
+                    return ResolverOutcome(candidate, reason, query, strategy)
+                if candidate is not None:
+                    if (
+                        best_low_conf is None
+                        or candidate.score > best_low_conf[2].score
+                    ):
+                        best_low_conf = (query, strategy, candidate)
+
+            if best_low_conf is not None:
+                query, strategy, candidate = best_low_conf
+                return ResolverOutcome(
+                    candidate=candidate,
+                    reason=_candidate_reason(candidate, min_score),
+                    query=query,
+                    strategy=strategy,
+                )
+            if had_error:
+                return ResolverOutcome(
+                    candidate=None,
+                    reason="search_failed",
+                    query=last_query,
+                    strategy=last_strategy,
+                )
+            return ResolverOutcome(
+                candidate=None,
+                reason="no results",
+                query=queries[-1][1] if queries else "",
+                strategy=queries[-1][0] if queries else "",
             )
-            primary_candidate = picker(
-                row, self.primary_client.source, primary_pages, self.primary_client
-            )
-        except Exception as e:
-            logger.debug(
-                "Search failed on %s for '%s': %s",
-                self.primary_client.source,
-                query,
-                e,
-            )
+
+        primary_outcome = await _resolve_for_client(self.primary_client)
 
         # Search fallback service if configured
         if self.fallback_client is not None:
-            try:
-                fallback_pages = await self.fallback_client.search(
-                    "track", query, limit=search_limit
-                )
-                fallback_candidate = picker(
-                    row,
-                    self.fallback_client.source,
-                    fallback_pages,
-                    self.fallback_client,
-                )
-            except Exception as e:
-                logger.debug(
-                    "Search failed on %s for '%s': %s",
-                    self.fallback_client.source,
-                    query,
-                    e,
-                )
+            fallback_outcome = await _resolve_for_client(self.fallback_client)
+
+        primary_candidate = (
+            primary_outcome.candidate
+            if primary_outcome.candidate
+            and primary_outcome.candidate.score >= min_score
+            else None
+        )
+        fallback_candidate = (
+            fallback_outcome.candidate
+            if fallback_outcome.candidate
+            and fallback_outcome.candidate.score >= min_score
+            else None
+        )
 
         if primary_candidate is None and fallback_candidate is None:
+            failure_reasons = ", ".join(
+                [
+                    f"{self.primary_client.source}: {primary_outcome.reason}",
+                    (
+                        f"{self.fallback_client.source}: {fallback_outcome.reason}"
+                        if self.fallback_client
+                        else ""
+                    ),
+                ]
+            ).strip(", ")
             logger.warning(
-                "No results found for '%s' by %s",
+                "Could not confidently resolve '%s' by %s (%s)",
                 row.track_name,
                 row.artists_raw,
+                failure_reasons,
             )
             status.unresolved += 1
             if self.db.unresolved_log is not None:
@@ -811,8 +1105,27 @@ class PendingCsvPlaylist(Pending):
                     fallback_source=self.fallback_client.source
                     if self.fallback_client
                     else "",
-                    reason="no search results from any service",
+                    reason=failure_reasons or "metadata mismatch",
                     row_index=row.row_index,
+                    primary_candidate_id=(
+                        primary_outcome.candidate.id
+                        if primary_outcome.candidate is not None
+                        else ""
+                    ),
+                    fallback_candidate_id=(
+                        fallback_outcome.candidate.id
+                        if fallback_outcome.candidate is not None
+                        else ""
+                    ),
+                    session_country=_session_country_hint(),
+                    query_strategy=" / ".join(
+                        s
+                        for s in (primary_outcome.strategy, fallback_outcome.strategy)
+                        if s
+                    ),
+                    attempted_query=" || ".join(
+                        q for q in (primary_outcome.query, fallback_outcome.query) if q
+                    ),
                 )
             if callback:
                 await callback()

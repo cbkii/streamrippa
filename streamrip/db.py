@@ -278,17 +278,57 @@ class UnresolvedQueryLog:
         "spotify_uri",
         "primary_source",
         "fallback_source",
+        "primary_candidate_id",
+        "fallback_candidate_id",
         "reason",
         "row_index",
+        "session_country",
+        "query_strategy",
+        "attempted_query",
+        "attempt_trace",
     ]
 
     def __init__(self, path: str):
+        """
+        Initialize the unresolved-query CSV log for the given path.
+
+        If the file does not exist, create it and write the expected header. If the file exists, read and validate its header against FIELDNAMES; when the header is empty or differs, rotate the existing file to a UTC timestamped `.bak`, emit a warning, and create a new file with the correct header. Initializes the session entry flag to False.
+
+        Parameters:
+            path (str): Filesystem path to the unresolved-query CSV file.
+        """
         self.path = path
         self._has_entries = False
         if not os.path.exists(path):
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
-                writer.writeheader()
+            self._write_header()
+            return
+
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                header = []
+
+        if header != self.FIELDNAMES:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_path = f"{path}.{timestamp}.bak"
+            os.replace(path, backup_path)
+            logger.warning(
+                "Detected unresolved-log header mismatch; rotated old log to %s",
+                backup_path,
+            )
+            self._write_header()
+
+    def _write_header(self) -> None:
+        """
+        Write the CSV header to self.path, creating or overwriting the file.
+
+        Opens the file with UTF-8 encoding and platform-neutral newlines, then writes a header row using FIELDNAMES.
+        """
+        with open(self.path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+            writer.writeheader()
 
     def log(
         self,
@@ -302,8 +342,34 @@ class UnresolvedQueryLog:
         fallback_source: str,
         reason: str,
         row_index: int,
+        primary_candidate_id: str = "",
+        fallback_candidate_id: str = "",
+        session_country: str = "",
+        query_strategy: str = "",
+        attempted_query: str = "",
+        attempt_trace: str = "",
     ):
-        """Append an unresolved-query entry to the CSV log."""
+        """
+        Append a timestamped unresolved-query row to the CSV log file.
+
+        Parameters:
+            track_name (str): Track title from the CSV row.
+            artists (str): Artist(s) string from the CSV row.
+            album (str): Album name from the CSV row.
+            release_date (str): Release date string from the CSV row.
+            isrc (str): ISRC identifier if present.
+            spotify_uri (str): Original Spotify URI if present.
+            primary_source (str): Primary provider/source attempted.
+            fallback_source (str): Fallback provider/source attempted.
+            reason (str): Short explanation why the row could not be resolved.
+            row_index (int): Index or line number of the CSV row being logged.
+            primary_candidate_id (str): Candidate ID returned by the primary source, if any.
+            fallback_candidate_id (str): Candidate ID returned by the fallback source, if any.
+            session_country (str): Session country code used for the attempt, if any.
+            query_strategy (str): Strategy label used to build the attempted query.
+            attempted_query (str): The actual query string that was attempted.
+            attempt_trace (str): Debug/trace information describing attempt steps or failures.
+        """
         self._has_entries = True
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -315,8 +381,14 @@ class UnresolvedQueryLog:
             "spotify_uri": spotify_uri,
             "primary_source": primary_source,
             "fallback_source": fallback_source,
+            "primary_candidate_id": primary_candidate_id,
+            "fallback_candidate_id": fallback_candidate_id,
             "reason": reason,
             "row_index": row_index,
+            "session_country": session_country,
+            "query_strategy": query_strategy,
+            "attempted_query": attempted_query,
+            "attempt_trace": attempt_trace,
         }
         with open(self.path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)

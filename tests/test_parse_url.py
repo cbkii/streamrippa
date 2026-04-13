@@ -12,12 +12,18 @@ from streamrip.rip.parse_url import (
 class TestParseURL(unittest.TestCase):
     def test_deezer_dynamic_url(self):
         """Test that Deezer dynamic URLs are matched correctly."""
-        url = "https://dzr.page.link/SnV6hCyHihkmCCwUA"
-        result = parse_url(url)
+        urls = [
+            "https://dzr.page.link/SnV6hCyHihkmCCwUA",
+            "https://deezer.page.link/SnV6hCyHihkmCCwUA",
+            "https://link.deezer.com/s/abc123",
+            "https://deezer.link/abc123",
+        ]
+        for url in urls:
+            result = parse_url(url)
 
-        self.assertIsNotNone(result)
-        self.assertIsInstance(result, DeezerDynamicURL)
-        self.assertEqual(result.source, "deezer")
+            self.assertIsNotNone(result)
+            self.assertIsInstance(result, DeezerDynamicURL)
+            self.assertEqual(result.source, "deezer")
 
     def test_qobuz_album_url(self):
         """Test that Qobuz album URLs are matched correctly."""
@@ -147,6 +153,41 @@ class TestDeezerDynamicURL(unittest.TestCase):
             self.assertEqual(pending.id, "12345")
 
         # Run the coroutine
+        asyncio.run(run_test())
+
+    def test_extract_info_prefers_redirect_target_url(self):
+        import asyncio
+        from unittest.mock import Mock
+
+        class _Ctx:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *_args):
+                return False
+
+        async def run_test():
+            mock_client = Mock()
+            mock_response = AsyncMock()
+            mock_response.url = "https://www.deezer.com/us/track/4195713"
+            mock_response.text.return_value = ""
+            mock_client.session = Mock()
+            mock_client.session.get.return_value = _Ctx(mock_response)
+
+            (
+                media_type,
+                item_id,
+            ) = await DeezerDynamicURL._extract_info_from_dynamic_link(
+                "https://deezer.page.link/abc",
+                mock_client,
+            )
+
+            self.assertEqual(media_type, "track")
+            self.assertEqual(item_id, "4195713")
+
         asyncio.run(run_test())
 
 

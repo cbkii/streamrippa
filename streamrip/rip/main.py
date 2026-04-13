@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import logging
 import os
@@ -414,21 +415,15 @@ class Main:
         source: str,
         fallback_source: str,
     ) -> None:
-        """Replay unresolved CSV rows from a previous import using repair-mode matching.
+        """
+        Re-run resolution for rows in an unresolved Exportify CSV log using repair-mode matching.
 
-        Reads the ``*_unresolved.csv`` log written by a prior Exportify CSV
-        import, re-runs the resolution with:
-        - expanded search window (:data:`~streamrip.media.csv_playlist._REPAIR_SEARCH_LIMIT`)
-        - fuzzy title scoring (:func:`~streamrip.file_lists.score_candidate_repair`)
+        Performs a repair pass over the *_unresolved.csv log produced by a previous Importify/Exportify CSV import. Resolution uses an expanded search window and fuzzy title scoring to attempt better matches. A new unresolved log named "<stem>_repair_unresolved.csv" is written alongside the input file so repair passes are idempotent and auditable.
 
-        A new unresolved log is written to ``<stem>_repair_unresolved.csv``
-        alongside the input file so multiple repair passes are idempotent and
-        independently auditable.
-
-        Args:
-            unresolved_csv_path: Path to the ``*_unresolved.csv`` log file.
-            source: Primary search source (e.g. ``"qobuz"``).
-            fallback_source: Fallback search source; empty string disables fallback.
+        Parameters:
+            unresolved_csv_path (str): Path to the "*_unresolved.csv" log file to repair.
+            source (str): Primary search source (e.g. "qobuz").
+            fallback_source (str): Fallback search source; empty string disables fallback.
         """
         from ..file_lists import parse_unresolved_csv
 
@@ -438,6 +433,57 @@ class Main:
                 "[yellow]No unresolved rows found in log — nothing to repair.[/yellow]"
             )
             return
+
+        current_country = (os.getenv("STREAMRIP_COUNTRY_CODE") or "").strip().upper()
+        row_context: dict[int, tuple[str, str]] = {}
+        try:
+            with open(unresolved_csv_path, encoding="utf-8-sig", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for i, rec in enumerate(reader):
+                    reason = (rec.get("reason") or "").strip().lower()
+                    country = (rec.get("session_country") or "").strip().upper()
+                    row_context[i] = (reason, country)
+        except Exception:
+            row_context = {}
+
+        def _row_priority(item):
+            """
+            Determine a sort priority for a CSV row repair task.
+
+            Given an (index, row) pair, returns an integer priority where lower numbers are processed first.
+            - 0: row indicates catalog availability/quality issues and the row's country differs from the current country.
+            - 1: row's reason contains "no results" (or "no search results") or "low confidence".
+            - 2: all other cases.
+
+            Parameters:
+                item (tuple): A tuple (index, row) identifying the row; `index` is used to look up per-row context in `row_context`.
+
+            Returns:
+                int: Priority value (0, 1, or 2) used for sorting repair candidates.
+            """
+            idx, _row = item
+            reason, row_country = row_context.get(idx, ("", ""))
+            is_catalog_availability = (
+                "unavailable on current service" in reason
+                or "quality unavailable" in reason
+            )
+            if (
+                is_catalog_availability
+                and current_country
+                and row_country
+                and row_country != current_country
+            ):
+                # Country changed: prioritize catalog-availability retries.
+                return 0
+            normalized_reason = reason.replace("no search results", "no results")
+            if (
+                "no results" in normalized_reason
+                or "low confidence" in normalized_reason
+            ):
+                return 1
+            return 2
+
+        rows = [row for _, row in sorted(enumerate(rows), key=_row_priority)]
 
         stem = os.path.splitext(unresolved_csv_path)[0]
         repair_unresolved_path = f"{stem}_repair_unresolved.csv"

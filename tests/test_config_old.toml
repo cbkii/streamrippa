@@ -37,19 +37,17 @@ token_expiry = "old_tokenexpiry"
 
 [deezer]
 # 0, 1, or 2
-# This only applies to paid Deezer subscriptions. Those using deezloader
-# are automatically limited to quality = 1
+# This applies to ARL-authenticated Deezer account downloads.
 quality = 2
 # An authentication cookie that allows streamrip to use your Deezer account
 # See https://github.com/nathom/streamrip/wiki/Finding-Your-Deezer-ARL-Cookie
 # for instructions on how to find this
 arl = "old_testarl"
-# This allows for free 320kbps MP3 downloads from Deezer
-# If an arl is provided, deezloader is never used
-use_deezloader = true
-# This warns you when the paid deezer account is not logged in and rip falls
-# back to deezloader, which is unreliable
-deezloader_warnings = true
+# Deprecated/no-op in current builds: deezloader fallback is not implemented.
+# Kept for backwards-compatible config parsing.
+use_deezloader = false
+# Deprecated/no-op in current builds. Kept for backwards-compatible config parsing.
+deezloader_warnings = false
 
 [soundcloud]
 # Only 0 is available for now
