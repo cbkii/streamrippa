@@ -138,12 +138,12 @@ class QobuzSpoofer:
     async def get_app_id_and_secrets(self) -> tuple[str, list[str]]:
         """
         Fetch the Qobuz login page, inspect its JavaScript bundle resources, and extract the app id and associated secret seeds.
-        
+
         Attempts to download the login page, find resource bundle URLs, fetch each bundle (prioritizing non-bundle scripts first), and decode the app id and secrets from the first bundle that yields valid values.
-        
+
         Returns:
             tuple[str, list[str]]: A pair where the first element is the extracted app id string and the second is a list of decoded secret strings.
-        
+
         Raises:
             RuntimeError: If the internal HTTP session is not initialized, if no bundle scripts are found on the login page, or if no bundle yields a valid app id and secrets.
         """
@@ -307,13 +307,13 @@ class QobuzClient(Client):
     async def get_label(self, label_id: str) -> dict:
         """
         Fetches metadata for a Qobuz label and returns the label object with all albums loaded.
-        
+
         Parameters:
             label_id (str): Qobuz label identifier.
-        
+
         Returns:
             dict: The label metadata JSON, including an "albums" key whose "items" list contains all albums for the label.
-        
+
         Raises:
             NonStreamableError: If the initial or any paginated request fails or returns a non-200 status.
         """
@@ -446,15 +446,15 @@ class QobuzClient(Client):
     ) -> list[dict]:
         """
         Fetch paginated API pages for the given endpoint until the requested number of items is collected.
-        
+
         Parameters:
             epoint (str): API endpoint path (e.g. "track/search", "album/getFeatured").
             params (dict): Base query parameters to send with each request; will be copied and updated for pagination.
             limit (int | None): Maximum number of items to consider across pages; if `None`, all available items are fetched.
-        
+
         Returns:
             list[dict]: A list of page JSON objects returned by the API (the initial page is the first element).
-        
+
         Raises:
             NonStreamableError: If the initial request or any subsequent page request fails or returns a non-200 status.
         """

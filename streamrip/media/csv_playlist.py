@@ -563,10 +563,10 @@ class PendingCsvTrack(Pending):
     def _classify_failure(attempts: list[AttemptResult]) -> str:
         """
         Classify a list of attempt results into a human-readable failure category.
-        
+
         Parameters:
             attempts (list[AttemptResult]): Sequence of attempted (service, quality) attempts with their `status` strings.
-        
+
         Returns:
             str: A failure category describing why resolution/download did not succeed. Possible categories include:
             - "all configured service/quality combinations exhausted"
@@ -600,14 +600,14 @@ class PendingCsvTrack(Pending):
     ) -> _MetaFetchResult:
         """
         Fetch and assemble metadata for a single track candidate and return a structured outcome status.
-        
+
         Performs a single metadata retrieval and constructs album and track metadata; callers should cache the result and reuse it across quality attempts. The returned _MetaFetchResult.status is one of:
         - "ok": metadata successfully fetched and parsed; `_MetaFetchResult.meta` contains the constructed `_CandidateMeta`.
         - "duplicate-race": candidate was already recorded as downloaded in the database; no metadata returned.
         - "provider-error": the provider request failed or raised an unexpected error; no metadata returned.
         - "matched unavailable": the provider response indicates the track or album is not streamable/available; no metadata returned.
         - "metadata-error": the provider response could not be converted into required TrackMetadata; no metadata returned.
-        
+
         On success, the returned `_MetaFetchResult.meta` holds:
         - `resp`: raw provider response,
         - `album`: `AlbumMetadata` built from the response,
@@ -691,12 +691,12 @@ class PendingCsvTrack(Pending):
     ) -> tuple[Track | None, str]:
         """
         Try to produce a downloadable Track for the given candidate using already-fetched metadata.
-        
+
         Parameters:
             candidate (TrackCandidate): Candidate identifying source and track id.
             cached (_CandidateMeta): Cached per-candidate metadata (album, track metadata, raw response) previously obtained.
             quality (int): Desired quality step to request from the provider.
-        
+
         Returns:
             tuple[Track | None, str]: A pair of (track, status). `track` is a Track object on success, `None` otherwise.
             `status` is one of:
@@ -938,9 +938,9 @@ class PendingCsvPlaylist(Pending):
         async def _resolve_for_client(client: Client) -> ResolverOutcome:
             """
             Resolve the best TrackCandidate for a single client by optionally using an ID hint and then running layered search queries.
-            
+
             Attempts an optional per-service ID hint (when repair mode and a hint exist); if that yields an acceptable match (score >= min_score) it is returned immediately. Otherwise runs the deterministic layered queries in order, scoring results with the configured picker and returning the first candidate that meets the minimum score. If no candidate meets the threshold the highest-scoring low-confidence candidate seen is returned. If any search invocation raised an exception and no candidate was selected, the outcome reason is `"search_failed"`. If no results were found and no errors occurred, the outcome reason is `"no results"`.
-            
+
             Returns:
                 ResolverOutcome: Outcome with:
                   - candidate: the selected TrackCandidate or `None` if none found,

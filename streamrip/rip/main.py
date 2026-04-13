@@ -417,9 +417,9 @@ class Main:
     ) -> None:
         """
         Re-run resolution for rows in an unresolved Exportify CSV log using repair-mode matching.
-        
+
         Performs a repair pass over the *_unresolved.csv log produced by a previous Importify/Exportify CSV import. Resolution uses an expanded search window and fuzzy title scoring to attempt better matches. A new unresolved log named "<stem>_repair_unresolved.csv" is written alongside the input file so repair passes are idempotent and auditable.
-        
+
         Parameters:
             unresolved_csv_path (str): Path to the "*_unresolved.csv" log file to repair.
             source (str): Primary search source (e.g. "qobuz").
@@ -449,15 +449,15 @@ class Main:
         def _row_priority(item):
             """
             Determine a sort priority for a CSV row repair task.
-            
+
             Given an (index, row) pair, returns an integer priority where lower numbers are processed first.
             - 0: row indicates catalog availability/quality issues and the row's country differs from the current country.
             - 1: row's reason contains "no results" (or "no search results") or "low confidence".
             - 2: all other cases.
-            
+
             Parameters:
                 item (tuple): A tuple (index, row) identifying the row; `index` is used to look up per-row context in `row_context`.
-            
+
             Returns:
                 int: Priority value (0, 1, or 2) used for sorting repair candidates.
             """

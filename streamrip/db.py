@@ -291,9 +291,9 @@ class UnresolvedQueryLog:
     def __init__(self, path: str):
         """
         Initialize the unresolved-query CSV log for the given path.
-        
+
         If the file does not exist, create it and write the expected header. If the file exists, read and validate its header against FIELDNAMES; when the header is empty or differs, rotate the existing file to a UTC timestamped `.bak`, emit a warning, and create a new file with the correct header. Initializes the session entry flag to False.
-        
+
         Parameters:
             path (str): Filesystem path to the unresolved-query CSV file.
         """
@@ -323,7 +323,7 @@ class UnresolvedQueryLog:
     def _write_header(self) -> None:
         """
         Write the CSV header to self.path, creating or overwriting the file.
-        
+
         Opens the file with UTF-8 encoding and platform-neutral newlines, then writes a header row using FIELDNAMES.
         """
         with open(self.path, "w", newline="", encoding="utf-8") as f:
@@ -351,7 +351,7 @@ class UnresolvedQueryLog:
     ):
         """
         Append a timestamped unresolved-query row to the CSV log file.
-        
+
         Parameters:
             track_name (str): Track title from the CSV row.
             artists (str): Artist(s) string from the CSV row.
