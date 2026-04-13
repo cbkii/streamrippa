@@ -187,10 +187,13 @@ def _normalise_variant_text(s: str) -> str:
     norm = _normalise(s)
     if not norm:
         return ""
-    # Remove common edition hints and standalone year tags.
-    norm = re.sub(
-        r"\b(?:remaster(?:ed)?|live|deluxe|radio edit|explicit|clean)\b", "", norm
+    # Remove known variant markers and standalone year tags.
+    marker_pattern = "|".join(
+        sorted(
+            (re.escape(marker) for marker in _VARIANT_MARKERS), key=len, reverse=True
+        )
     )
+    norm = re.sub(rf"\b(?:{marker_pattern})\b", "", norm)
     norm = re.sub(r"\b(?:19|20)\d{2}\b", "", norm)
     norm = re.sub(r"\s+", " ", norm).strip()
     return norm
@@ -283,9 +286,13 @@ def score_candidate(
     # Strong title requirement first; this keeps generic text search as fallback
     # but prevents unrelated tracks from winning on weak metadata overlap.
     titles_match = norm_title == norm_cand
-    variant_titles_match = _normalise_variant_text(
-        row.track_name
-    ) == _normalise_variant_text(candidate_title)
+    row_variant_title = _normalise_variant_text(row.track_name)
+    candidate_variant_title = _normalise_variant_text(candidate_title)
+    variant_titles_match = (
+        bool(row_variant_title)
+        and bool(candidate_variant_title)
+        and row_variant_title == candidate_variant_title
+    )
 
     if not titles_match and not variant_titles_match:
         return 0

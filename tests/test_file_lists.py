@@ -10,6 +10,7 @@ from streamrip.file_lists import (
     ExportifyCsvRow,
     _artist_overlap,
     _normalise,
+    _normalise_variant_text,
     detect_file_mode,
     parse_exportify_csv,
     score_candidate,
@@ -315,6 +316,28 @@ def test_score_variant_title_normalization():
         "",
     )
     assert score >= 55
+
+
+def test_normalise_variant_text_removes_all_variant_markers():
+    assert (
+        _normalise_variant_text(
+            "Song Name Bonus Track Live Radio Edit ft Artist (2011 Remaster)"
+        )
+        == "song name artist"
+    )
+
+
+def test_score_variant_title_does_not_match_empty_normalized_titles():
+    row = _make_row(title="1999")
+    score = score_candidate(
+        row,
+        "2000",
+        "Miles Davis",
+        "Kind of Blue",
+        "1959",
+        "",
+    )
+    assert score == 0
 
 
 def test_score_multi_artist_prefers_full_coverage():

@@ -292,9 +292,30 @@ class UnresolvedQueryLog:
         self.path = path
         self._has_entries = False
         if not os.path.exists(path):
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
-                writer.writeheader()
+            self._write_header()
+            return
+
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                header = []
+
+        if header != self.FIELDNAMES:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_path = f"{path}.{timestamp}.bak"
+            os.replace(path, backup_path)
+            logger.warning(
+                "Detected unresolved-log header mismatch; rotated old log to %s",
+                backup_path,
+            )
+            self._write_header()
+
+    def _write_header(self) -> None:
+        with open(self.path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+            writer.writeheader()
 
     def log(
         self,

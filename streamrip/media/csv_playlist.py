@@ -373,6 +373,12 @@ class _CandidateMeta:
 
 
 @dataclass(slots=True)
+class _MetaFetchResult:
+    status: str
+    meta: _CandidateMeta | None = None
+
+
+@dataclass(slots=True)
 class AttemptResult:
     source: str
     quality: int
@@ -438,30 +444,35 @@ class PendingCsvTrack(Pending):
                 return None
 
         # --- Fetch metadata for each candidate exactly once ---
-        primary_meta: _CandidateMeta | None = None
-        fallback_meta: _CandidateMeta | None = None
+        primary_fetch = _MetaFetchResult(status="no-candidate")
+        fallback_fetch = _MetaFetchResult(status="no-candidate")
 
         if self.primary_candidate is not None:
-            primary_meta = await self._fetch_candidate_meta(self.primary_candidate)
+            primary_fetch = await self._fetch_candidate_meta(self.primary_candidate)
 
         if self.fallback_candidate is not None:
-            fallback_meta = await self._fetch_candidate_meta(self.fallback_candidate)
+            fallback_fetch = await self._fetch_candidate_meta(self.fallback_candidate)
 
         attempts: list[AttemptResult] = []
 
-        # If metadata could not be fetched for a candidate it is treated as unavailable.
-        effective_primary = self.primary_candidate if primary_meta is not None else None
+        effective_primary = (
+            self.primary_candidate
+            if self.primary_candidate is not None and primary_fetch.meta is not None
+            else None
+        )
         effective_fallback = (
-            self.fallback_candidate if fallback_meta is not None else None
+            self.fallback_candidate
+            if self.fallback_candidate is not None and fallback_fetch.meta is not None
+            else None
         )
 
-        if self.primary_candidate is not None and primary_meta is None:
+        if self.primary_candidate is not None and primary_fetch.meta is None:
             attempts.append(
-                AttemptResult(self.primary_source, -1, "matched unavailable")
+                AttemptResult(self.primary_source, -1, primary_fetch.status)
             )
-        if self.fallback_candidate is not None and fallback_meta is None:
+        if self.fallback_candidate is not None and fallback_fetch.meta is None:
             attempts.append(
-                AttemptResult(self.fallback_source, -1, "matched unavailable")
+                AttemptResult(self.fallback_source, -1, fallback_fetch.status)
             )
 
         max_passes = max(
@@ -473,11 +484,11 @@ class PendingCsvTrack(Pending):
         # quality-step index across configured services before stepping down.
         for pass_idx in range(max_passes):
             if effective_primary and pass_idx < len(self.primary_qualities):
-                assert primary_meta is not None
+                assert primary_fetch.meta is not None
                 quality = self.primary_qualities[pass_idx]
                 track, status = await self._try_candidate_with_meta(
                     effective_primary,
-                    primary_meta,
+                    primary_fetch.meta,
                     quality,
                 )
                 attempts.append(
@@ -493,11 +504,11 @@ class PendingCsvTrack(Pending):
                     return track
 
             if effective_fallback and pass_idx < len(self.fallback_qualities):
-                assert fallback_meta is not None
+                assert fallback_fetch.meta is not None
                 quality = self.fallback_qualities[pass_idx]
                 track, status = await self._try_candidate_with_meta(
                     effective_fallback,
-                    fallback_meta,
+                    fallback_fetch.meta,
                     quality,
                 )
                 attempts.append(
@@ -559,13 +570,19 @@ class PendingCsvTrack(Pending):
             return "download attempt failed after a valid service/quality match"
         if "quality unavailable" in statuses:
             return "matched item available, but requested/highest quality unavailable"
+        if "provider-error" in statuses:
+            return "provider error while resolving matched candidate metadata"
+        if "metadata-error" in statuses:
+            return "metadata processing error for matched candidate"
+        if "duplicate-race" in statuses:
+            return "matched candidate already downloaded in concurrent run"
         return "all configured service/quality combinations exhausted"
 
     async def _fetch_candidate_meta(
         self,
         candidate: TrackCandidate,
-    ) -> _CandidateMeta | None:
-        """Fetch and build metadata for *candidate*.  Returns ``None`` on any failure.
+    ) -> _MetaFetchResult:
+        """Fetch and build metadata for *candidate* with explicit outcome status.
 
         This is called **once per candidate** before the quality loop so that
         subsequent quality passes can reuse the cached result without repeating
@@ -579,7 +596,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
             )
             self.db.set_skipped()
-            return None
+            return _MetaFetchResult(status="duplicate-race")
 
         try:
             resp = await candidate.client.get_metadata(candidate.id, "track")
@@ -590,7 +607,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return _MetaFetchResult(status="provider-error")
         except Exception as e:
             logger.debug(
                 "Unexpected error fetching metadata for %s:%s: %s",
@@ -598,7 +615,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return _MetaFetchResult(status="provider-error")
 
         album = AlbumMetadata.from_track_resp(resp, candidate.source)
         if album is None:
@@ -608,7 +625,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 candidate.source,
             )
-            return None
+            return _MetaFetchResult(status="matched unavailable")
 
         meta = TrackMetadata.from_resp(album, candidate.source, resp)
         if meta is None:
@@ -617,7 +634,7 @@ class PendingCsvTrack(Pending):
                 candidate.source,
                 candidate.id,
             )
-            return None
+            return _MetaFetchResult(status="metadata-error")
 
         c = self.config.session.metadata
         if c.renumber_playlist_tracks:
@@ -636,7 +653,10 @@ class PendingCsvTrack(Pending):
             except Exception as e:
                 logger.warning("Failed to build extra tags for '%s': %s", meta.title, e)
 
-        return _CandidateMeta(resp=resp, album=album, meta=meta)
+        return _MetaFetchResult(
+            status="ok",
+            meta=_CandidateMeta(resp=resp, album=album, meta=meta),
+        )
 
     async def _try_candidate_with_meta(
         self,
@@ -883,6 +903,9 @@ class PendingCsvPlaylist(Pending):
         async def _resolve_for_client(client: Client) -> ResolverOutcome:
             queries = _build_search_queries(row, client.source)
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
+            had_error = False
+            last_query = ""
+            last_strategy = ""
 
             hinted_id = ""
             if self.repair_mode and row.repair_candidate_ids:
@@ -938,10 +961,13 @@ class PendingCsvPlaylist(Pending):
                     )
 
             for strategy, query in queries:
+                last_query = query
+                last_strategy = strategy
                 try:
                     pages = await client.search("track", query, limit=search_limit)
                     candidate = picker(row, client.source, pages, client)
                 except Exception as e:
+                    had_error = True
                     logger.debug(
                         "Search failed on %s (%s) for '%s': %s",
                         client.source,
@@ -968,6 +994,13 @@ class PendingCsvPlaylist(Pending):
                     reason=_candidate_reason(candidate, min_score),
                     query=query,
                     strategy=strategy,
+                )
+            if had_error:
+                return ResolverOutcome(
+                    candidate=None,
+                    reason="search_failed",
+                    query=last_query,
+                    strategy=last_strategy,
                 )
             return ResolverOutcome(
                 candidate=None,

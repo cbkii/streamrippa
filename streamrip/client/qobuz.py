@@ -26,6 +26,7 @@ from .downloadable import BasicDownloadable, Downloadable
 logger = logging.getLogger("streamrip")
 
 QOBUZ_BASE_URL = "https://www.qobuz.com/api.json/0.2"
+_PAGINATION_BATCH_SIZE = 10
 
 QOBUZ_FEATURED_KEYS = {
     "most-streamed",
@@ -151,9 +152,11 @@ class QobuzSpoofer:
             async with self.session.get(bundle_url) as req:
                 bundle = await req.text()
             try:
-                return self._extract_app_id_and_secrets_from_bundle(bundle)
+                app_id, secrets = self._extract_app_id_and_secrets_from_bundle(bundle)
             except ValueError:
                 continue
+            if app_id and secrets:
+                return app_id, secrets
 
         raise RuntimeError(
             "Unable to extract app id/secrets from current Qobuz web assets"
@@ -325,14 +328,21 @@ class QobuzClient(Client):
             for offset in range(page_limit, albums_count, page_limit)
         ]
 
-        results = await asyncio.gather(*requests)
         items = label_resp["albums"]["items"]
-        for status, resp in results:
-            if status != 200:
-                raise NonStreamableError(
-                    f"Error fetching paginated Qobuz label metadata: {resp.get('message', resp)}"
-                )
-            items.extend(resp["albums"]["items"])
+        for i in range(0, len(requests), _PAGINATION_BATCH_SIZE):
+            batch = requests[i : i + _PAGINATION_BATCH_SIZE]
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    raise NonStreamableError(
+                        f"Error fetching paginated Qobuz label metadata: {result}"
+                    )
+                status, resp = result
+                if status != 200:
+                    raise NonStreamableError(
+                        f"Error fetching paginated Qobuz label metadata: {resp.get('message', resp)}"
+                    )
+                items.extend(resp["albums"]["items"])
 
         return label_resp
 
@@ -455,12 +465,20 @@ class QobuzClient(Client):
             params.update({"offset": offset})
             requests.append(self._api_request(epoint, params.copy()))
 
-        for status, resp in await asyncio.gather(*requests):
-            if status != 200:
-                raise NonStreamableError(
-                    f"Qobuz pagination page failed ({status}) for {epoint}: {resp.get('message', resp)}"
-                )
-            pages.append(resp)
+        for i in range(0, len(requests), _PAGINATION_BATCH_SIZE):
+            batch = requests[i : i + _PAGINATION_BATCH_SIZE]
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    raise NonStreamableError(
+                        f"Qobuz pagination page failed for {epoint}: {result}"
+                    )
+                status, resp = result
+                if status != 200:
+                    raise NonStreamableError(
+                        f"Qobuz pagination page failed ({status}) for {epoint}: {resp.get('message', resp)}"
+                    )
+                pages.append(resp)
 
         return pages
 

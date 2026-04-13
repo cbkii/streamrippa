@@ -467,7 +467,11 @@ class Main:
             ):
                 # Country changed: prioritize catalog-availability retries.
                 return 0
-            if "no search results" in reason or "low confidence" in reason:
+            normalized_reason = reason.replace("no search results", "no results")
+            if (
+                "no results" in normalized_reason
+                or "low confidence" in normalized_reason
+            ):
                 return 1
             return 2
 
