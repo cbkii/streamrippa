@@ -81,7 +81,7 @@ rip --help
 To update to a newer release, download the new wheel from the [Releases page](https://github.com/cbkii/streamrippa/releases) and reinstall:
 
 ```bash
-python -m pip install --upgrade streamrip-<new-version>-py3-none-any.whl
+python -m pip install --upgrade ./streamrip-<new-version>-py3-none-any.whl
 ```
 
 If you run into issues, or want the absolute latest development build, install directly from the `dev` branch:
