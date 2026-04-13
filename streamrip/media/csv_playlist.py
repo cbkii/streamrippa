@@ -506,7 +506,7 @@ class PendingCsvTrack(Pending):
             album.album = self.playlist_name
 
         # Build extra tags from CSV row (best-effort)
-        tag_map = c.exportify_tag_map if hasattr(c, "exportify_tag_map") else {}
+        tag_map = getattr(c, "exportify_tag_map", {})
         if tag_map:
             try:
                 provider_genre = album.get_genres() if album.genre else None

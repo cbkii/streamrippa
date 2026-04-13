@@ -314,3 +314,92 @@ def test_artist_overlap_basic():
     assert _artist_overlap(["Miles Davis"], "Miles Davis")
     assert not _artist_overlap(["Miles Davis"], "John Coltrane")
     assert _artist_overlap(["Artist A", "Artist B"], "Artist B")
+
+
+# ---------------------------------------------------------------------------
+# score_candidate_repair — fuzzy matching
+# ---------------------------------------------------------------------------
+
+
+def test_repair_score_exact_delegates_to_standard():
+    """When standard scorer returns > 0, repair scorer returns the same value."""
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    std = score_candidate(row, "Blue in Green", "Miles Davis", "", "", "")
+    repair = score_candidate_repair(row, "Blue in Green", "Miles Davis", "", "", "")
+    assert repair == std
+    assert repair >= 60
+
+
+def test_repair_score_isrc_short_circuits():
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row(isrc="USJAZ1234567")
+    score = score_candidate_repair(
+        row, "Totally Different Title", "Unknown Artist", "", "", "USJAZ1234567"
+    )
+    assert score == 100
+
+
+def test_repair_score_fuzzy_title_with_artist():
+    """Fuzzy title match + artist overlap should score 35."""
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    # Slightly misspelled title that still exceeds 0.80 ratio
+    score = score_candidate_repair(row, "Blue in Gren", "Miles Davis", "", "", "")
+    assert score == 35
+
+
+def test_repair_score_fuzzy_title_with_album():
+    """Fuzzy title match + album partial match should score 28."""
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    score = score_candidate_repair(
+        row, "Blue in Gren", "Unknown Artist", "Kind of Blue", "", ""
+    )
+    assert score == 28
+
+
+def test_repair_score_fuzzy_title_only():
+    """Fuzzy title match only should score 20."""
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    score = score_candidate_repair(
+        row, "Blue in Gren", "Unknown Artist", "Other Album", "", ""
+    )
+    assert score == 20
+
+
+def test_repair_score_fuzzy_with_year_bonus():
+    """Fuzzy score should get +5 year bonus when years match."""
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    score_with_year = score_candidate_repair(
+        row, "Blue in Gren", "Miles Davis", "", "1959-01-01", ""
+    )
+    score_without_year = score_candidate_repair(
+        row, "Blue in Gren", "Miles Davis", "", "2020-01-01", ""
+    )
+    assert score_with_year == score_without_year + 5
+
+
+def test_repair_score_very_different_title_returns_zero():
+    """A completely different title should not match even in repair mode."""
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    score = score_candidate_repair(row, "Bohemian Rhapsody", "Queen", "", "", "")
+    assert score == 0
+
+
+def test_repair_score_empty_title_returns_zero():
+    from streamrip.file_lists import score_candidate_repair
+
+    row = _make_row()
+    score = score_candidate_repair(row, "", "Miles Davis", "", "", "")
+    assert score == 0

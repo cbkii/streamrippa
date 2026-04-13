@@ -313,7 +313,7 @@ def _write_single_extra_tag(
         from mutagen import id3 as _id3
 
         desc = tag_name
-        frame = _id3.TXXX(encoding=3, desc=desc, text=value)
+        frame = _id3.TXXX(encoding=3, desc=desc, text=[value])
         audio.add(frame)
     elif container == Container.AAC:
         # MP4 freeform atom

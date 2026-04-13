@@ -71,6 +71,7 @@ class Artist(Media):
                 if (
                     album is None
                     or (filters.extras and not self._extras(album))
+                    or (filters.non_albums and not self._non_albums(album))
                     or (filters.features and not self._features(album))
                     or (
                         filters.non_studio_albums and not self._non_studio_albums(album)
@@ -97,6 +98,8 @@ class Artist(Media):
             _albums = self._filter_repeats(_albums)
         if filt.extras:
             _albums = filter(self._extras, _albums)
+        if filt.non_albums:
+            _albums = filter(self._non_albums, _albums)
         if filt.features:
             _albums = filter(self._features, _albums)
         if filt.non_studio_albums:
