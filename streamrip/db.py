@@ -280,6 +280,10 @@ class UnresolvedQueryLog:
         "fallback_source",
         "reason",
         "row_index",
+        "session_country",
+        "query_strategy",
+        "attempted_query",
+        "attempt_trace",
     ]
 
     def __init__(self, path: str):
@@ -302,6 +306,10 @@ class UnresolvedQueryLog:
         fallback_source: str,
         reason: str,
         row_index: int,
+        session_country: str = "",
+        query_strategy: str = "",
+        attempted_query: str = "",
+        attempt_trace: str = "",
     ):
         """Append an unresolved-query entry to the CSV log."""
         self._has_entries = True
@@ -317,6 +325,10 @@ class UnresolvedQueryLog:
             "fallback_source": fallback_source,
             "reason": reason,
             "row_index": row_index,
+            "session_country": session_country,
+            "query_strategy": query_strategy,
+            "attempted_query": attempted_query,
+            "attempt_trace": attempt_trace,
         }
         with open(self.path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)

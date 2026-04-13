@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import logging
 import os
@@ -438,6 +439,39 @@ class Main:
                 "[yellow]No unresolved rows found in log — nothing to repair.[/yellow]"
             )
             return
+
+        current_country = (os.getenv("STREAMRIP_COUNTRY_CODE") or "").strip().upper()
+        row_context: dict[int, tuple[str, str]] = {}
+        try:
+            with open(unresolved_csv_path, encoding="utf-8-sig", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for i, rec in enumerate(reader):
+                    reason = (rec.get("reason") or "").strip().lower()
+                    country = (rec.get("session_country") or "").strip().upper()
+                    row_context[i] = (reason, country)
+        except Exception:
+            row_context = {}
+
+        def _row_priority(item):
+            idx, _row = item
+            reason, row_country = row_context.get(idx, ("", ""))
+            is_catalog_availability = (
+                "unavailable on current service" in reason
+                or "quality unavailable" in reason
+            )
+            if (
+                is_catalog_availability
+                and current_country
+                and row_country
+                and row_country != current_country
+            ):
+                # Country changed: prioritize catalog-availability retries.
+                return 0
+            if "no search results" in reason or "low confidence" in reason:
+                return 1
+            return 2
+
+        rows = [row for _, row in sorted(enumerate(rows), key=_row_priority)]
 
         stem = os.path.splitext(unresolved_csv_path)[0]
         repair_unresolved_path = f"{stem}_repair_unresolved.csv"
