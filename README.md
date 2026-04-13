@@ -4,6 +4,8 @@
 
 A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 
+> Naming note: this repository is **streamrippa** (`cbkii/streamrippa`), while the installable Python package and CLI name remain **streamrip** / `rip` for compatibility.
+
 ![downloading an album](https://github.com/cbkii/streamrippa/blob/dev/demo/download_album.png?raw=true)
 
 ## Features
@@ -46,6 +48,12 @@ sudo apt update
 sudo apt install -y python3-full python3-venv ffmpeg
 ```
 
+If `pip` needs to build native dependencies from source on older Debian / Raspberry Pi OS images, install build tooling once:
+
+```bash
+sudo apt install -y build-essential python3-dev libffi-dev
+```
+
 > On Debian, Ubuntu, and Raspberry Pi OS, installing with `pip3` into the system Python may fail with an `externally-managed-environment` error. A virtual environment avoids this.
 
 ```bash
@@ -73,13 +81,13 @@ rip --help
 To update to a newer release, download the new wheel from the [Releases page](https://github.com/cbkii/streamrippa/releases) and reinstall:
 
 ```bash
-pip3 install --upgrade streamrip-<new-version>-py3-none-any.whl
+python -m pip install --upgrade ./streamrip-<new-version>-py3-none-any.whl
 ```
 
 If you run into issues, or want the absolute latest development build, install directly from the `dev` branch:
 
 ```bash
-pip3 install git+https://github.com/cbkii/streamrippa.git@dev
+python -m pip install git+https://github.com/cbkii/streamrippa.git@dev
 ```
 
 When you type
@@ -312,7 +320,7 @@ rip url --help
 
 ## Other information
 
-For more in-depth information about `streamrip`, see the help pages and the [wiki](https://github.com/nathom/streamrip/wiki/).
+For more in-depth information about this fork (`streamrippa`) and the `streamrip` CLI/package, see the help pages and the [upstream wiki](https://github.com/nathom/streamrip/wiki/).
 
 ## Contributions
 

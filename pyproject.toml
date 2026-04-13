@@ -61,6 +61,7 @@ testpaths = ["tests"]
 log_level = "DEBUG"
 asyncio_mode = 'auto'
 log_cli = true
+pythonpath = ["."]
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

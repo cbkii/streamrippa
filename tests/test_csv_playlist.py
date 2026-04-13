@@ -20,6 +20,7 @@ from streamrip.media.csv_playlist import (
     _CandidateMeta,
     _chunks,
     _extract_raw_results,
+    _MetaFetchResult,
     _pick_best_candidate,
     _pick_best_candidate_repair,
 )
@@ -853,6 +854,34 @@ async def test_pending_csv_playlist_low_confidence_result_marked_unresolved(tmp_
     assert ",US," in content
 
 
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_search_errors_are_logged_as_search_failed(tmp_path):
+    db = _make_db()
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    from streamrip.db import UnresolvedQueryLog
+
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(side_effect=RuntimeError("provider timeout"))
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[_make_row()],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+
+    result = await pending.resolve()
+    assert result is None
+
+    with open(unresolved_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "search_failed" in content
+
+
 # ---------------------------------------------------------------------------
 # Regression: existing Deezer non-CSV flows unchanged
 # ---------------------------------------------------------------------------
@@ -912,11 +941,27 @@ async def test_metadata_fetched_once_per_candidate_across_quality_passes():
     fetch_calls: list[str] = []
 
     async def _fake_fetch(self_arg, candidate):
+        """
+        Record the candidate's source and return a successful metadata fetch result with mocked metadata.
+
+        Parameters:
+            self_arg: Unused; preserved to match the original method signature.
+            candidate: The track candidate whose `source` will be appended to `fetch_calls`.
+
+        Returns:
+            _MetaFetchResult: An object with `status="ok"` and `meta` set to `mock_meta`.
+        """
         fetch_calls.append(candidate.source)
-        return mock_meta
+        return _MetaFetchResult(status="ok", meta=mock_meta)
 
     async def _fake_try(self_arg, candidate, cached, quality):
         # Always fail so all quality passes are exhausted
+        """
+        Simulate a failed candidate attempt so all quality passes are treated as exhausted.
+
+        Returns:
+            (None, str): A two-tuple where the first element is `None` (no track) and the second is the failure reason; specifically `"quality unavailable"`.
+        """
         return None, "quality unavailable"
 
     with (
@@ -934,8 +979,8 @@ async def test_metadata_fetched_once_per_candidate_across_quality_passes():
 
 @pytest.mark.asyncio
 async def test_metadata_fetch_failure_skips_candidate_quality_passes():
-    """If _fetch_candidate_meta returns None for a candidate, all its quality
-    passes must be skipped — the other candidate is still tried."""
+    """If metadata fetch is unavailable for one candidate, its quality passes
+    must be skipped — the other candidate is still tried."""
     db = _make_db()
     cfg = _make_config()
     primary_client = _make_client("qobuz")
@@ -963,11 +1008,33 @@ async def test_metadata_fetch_failure_skips_candidate_quality_passes():
     )
 
     async def _fake_fetch(self_arg, candidate):
+        """
+        Simulate fetching metadata for a candidate in tests, returning a deterministic _MetaFetchResult.
+
+        Parameters:
+            candidate: The candidate whose `source` determines the simulated outcome.
+
+        Returns:
+            _MetaFetchResult: For candidates from `"qobuz"`, a result with `status="matched unavailable"`.
+            For all other sources, a result with `status="ok"` and `meta` set to `mock_meta`.
+        """
         if candidate.source == "qobuz":
-            return None  # primary metadata unavailable
-        return mock_meta  # fallback metadata OK
+            return _MetaFetchResult(status="matched unavailable")
+        return _MetaFetchResult(status="ok", meta=mock_meta)
 
     async def _fake_try(self_arg, candidate, cached, quality):
+        """
+        Simulate attempting a candidate and always succeed for the first quality pass.
+
+        Parameters:
+            self_arg: Placeholder for bound method `self` (unused).
+            candidate: Candidate being attempted (ignored by this fake).
+            cached: Cached metadata/state for the candidate (ignored).
+            quality: Quality level being attempted (ignored).
+
+        Returns:
+            tuple: (track, status) where `track` is the mocked track returned to signal success and `status` is the string `"ok"`.
+        """
         return mock_track, "ok"  # fallback succeeds at first quality
 
     with (
@@ -978,6 +1045,50 @@ async def test_metadata_fetch_failure_skips_candidate_quality_passes():
 
     # Fallback must have been used since primary metadata failed
     assert result is mock_track
+
+
+@pytest.mark.asyncio
+async def test_metadata_fetch_provider_error_not_classified_as_unavailable(tmp_path):
+    db = _make_db()
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    from streamrip.db import UnresolvedQueryLog
+
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    primary_cand = _make_candidate("qobuz", primary_client, id="q1")
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=primary_cand,
+        fallback_candidate=None,
+        primary_qualities=[2, 1, 0],
+        fallback_qualities=[],
+        primary_source="qobuz",
+        fallback_source="",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+
+    async def _fake_fetch(_self_arg, _candidate):
+        """
+        Simulate a metadata fetch that fails with a provider-level error.
+
+        Returns:
+            _MetaFetchResult: An instance with `status` set to `"provider-error"`.
+        """
+        return _MetaFetchResult(status="provider-error")
+
+    with patch.object(PendingCsvTrack, "_fetch_candidate_meta", _fake_fetch):
+        result = await track.resolve()
+
+    assert result is None
+    with open(unresolved_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "provider error while resolving matched candidate metadata" in content
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1454,23 @@ def test_parse_unresolved_csv_empty_file(tmp_path):
     assert rows == []
 
 
+def test_unresolved_query_log_rotates_when_header_schema_mismatch(tmp_path):
+    from streamrip.db import UnresolvedQueryLog
+
+    log_path = tmp_path / "legacy_unresolved.csv"
+    log_path.write_text("legacy_header_a,legacy_header_b\nv1,v2\n", encoding="utf-8")
+
+    log = UnresolvedQueryLog(str(log_path))
+    assert log.has_entries is False
+
+    backups = list(tmp_path.glob("legacy_unresolved.csv.*.bak"))
+    assert len(backups) == 1
+
+    with open(log_path, encoding="utf-8") as fh:
+        header = fh.readline().strip()
+    assert header == ",".join(UnresolvedQueryLog.FIELDNAMES)
+
+
 @pytest.mark.asyncio
 async def test_repair_csv_main_method(tmp_path):
     """Main.repair_csv must parse the unresolved log, call resolve_csv with
@@ -1462,3 +1590,69 @@ async def test_repair_csv_prioritizes_availability_rows_when_country_changes(tmp
     ordered = resolve_calls[0]["rows"]
     assert ordered[0].track_name == "Track B"
     assert ordered[1].track_name == "Track A"
+
+
+@pytest.mark.asyncio
+async def test_repair_csv_prioritizes_no_results_reasons(tmp_path):
+    """
+    Ensure Main.repair_csv processes unresolved rows so entries with reason "no results" are ordered before those with "metadata mismatch".
+
+    Writes a two-row unresolved CSV (one "metadata mismatch", one "no results"), invokes Main.repair_csv with qobuz primary and deezer fallback, and asserts the rows passed to resolve_csv are ordered with the "no results" row first.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from streamrip.rip.main import Main
+
+    log_path = str(tmp_path / "liked_songs_unresolved.csv")
+    with open(log_path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(
+            "timestamp,track_name,artists,album,release_date,isrc,spotify_uri,"
+            "primary_source,fallback_source,reason,row_index,session_country,"
+            "query_strategy,attempted_query,attempt_trace\n"
+        )
+        fh.write(
+            "2026-01-01T00:00:00Z,Track C,Artist,Album,2020,,,"
+            "qobuz,deezer,metadata mismatch,0,US,structured,qC,\n"
+        )
+        fh.write(
+            "2026-01-01T00:00:00Z,Track D,Artist,Album,2020,,,"
+            "qobuz,deezer,no results,1,US,structured,qD,\n"
+        )
+
+    config = MagicMock()
+    config.session.downloads.requests_per_minute = 0
+    config.session.database.downloads_enabled = False
+    config.session.database.failed_downloads_enabled = False
+    config.session.reliability.fail_fast = False
+
+    with (
+        patch("streamrip.rip.main.QobuzClient"),
+        patch("streamrip.rip.main.TidalClient"),
+        patch("streamrip.rip.main.DeezerClient"),
+        patch("streamrip.rip.main.SoundcloudClient"),
+    ):
+        main = Main(config)
+        resolve_calls = []
+
+        async def _fake_resolve_csv(**kwargs):
+            """
+            Record invocation arguments for a test double that simulates CSV resolution.
+
+            Appends all keyword arguments received to the shared `resolve_calls` list so tests can inspect how the resolver was invoked.
+
+            Parameters:
+                **kwargs: Arbitrary keyword arguments representing the invocation details to record.
+            """
+            resolve_calls.append(kwargs)
+
+        main.resolve_csv = _fake_resolve_csv
+        await main.repair_csv(
+            unresolved_csv_path=log_path,
+            source="qobuz",
+            fallback_source="deezer",
+        )
+
+    assert len(resolve_calls) == 1
+    ordered = resolve_calls[0]["rows"]
+    assert ordered[0].track_name == "Track D"
+    assert ordered[1].track_name == "Track C"

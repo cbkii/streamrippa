@@ -26,6 +26,7 @@ from .downloadable import BasicDownloadable, Downloadable
 logger = logging.getLogger("streamrip")
 
 QOBUZ_BASE_URL = "https://www.qobuz.com/api.json/0.2"
+_PAGINATION_BATCH_SIZE = 10
 
 QOBUZ_FEATURED_KEYS = {
     "most-streamed",
@@ -135,6 +136,17 @@ class QobuzSpoofer:
         return app_id, vals
 
     async def get_app_id_and_secrets(self) -> tuple[str, list[str]]:
+        """
+        Fetch the Qobuz login page, inspect its JavaScript bundle resources, and extract the app id and associated secret seeds.
+
+        Attempts to download the login page, find resource bundle URLs, fetch each bundle (prioritizing non-bundle scripts first), and decode the app id and secrets from the first bundle that yields valid values.
+
+        Returns:
+            tuple[str, list[str]]: A pair where the first element is the extracted app id string and the second is a list of decoded secret strings.
+
+        Raises:
+            RuntimeError: If the internal HTTP session is not initialized, if no bundle scripts are found on the login page, or if no bundle yields a valid app id and secrets.
+        """
         if self.session is None:
             raise RuntimeError("QobuzSpoofer session is not initialized")
         async with self.session.get("https://play.qobuz.com/login") as req:
@@ -151,9 +163,11 @@ class QobuzSpoofer:
             async with self.session.get(bundle_url) as req:
                 bundle = await req.text()
             try:
-                return self._extract_app_id_and_secrets_from_bundle(bundle)
+                app_id, secrets = self._extract_app_id_and_secrets_from_bundle(bundle)
             except ValueError:
                 continue
+            if app_id and secrets:
+                return app_id, secrets
 
         raise RuntimeError(
             "Unable to extract app id/secrets from current Qobuz web assets"
@@ -291,6 +305,18 @@ class QobuzClient(Client):
         return resp
 
     async def get_label(self, label_id: str) -> dict:
+        """
+        Fetches metadata for a Qobuz label and returns the label object with all albums loaded.
+
+        Parameters:
+            label_id (str): Qobuz label identifier.
+
+        Returns:
+            dict: The label metadata JSON, including an "albums" key whose "items" list contains all albums for the label.
+
+        Raises:
+            NonStreamableError: If the initial or any paginated request fails or returns a non-200 status.
+        """
         c = self.config.session.qobuz
         page_limit = 500
         params = {
@@ -325,14 +351,21 @@ class QobuzClient(Client):
             for offset in range(page_limit, albums_count, page_limit)
         ]
 
-        results = await asyncio.gather(*requests)
         items = label_resp["albums"]["items"]
-        for status, resp in results:
-            if status != 200:
-                raise NonStreamableError(
-                    f"Error fetching paginated Qobuz label metadata: {resp.get('message', resp)}"
-                )
-            items.extend(resp["albums"]["items"])
+        for i in range(0, len(requests), _PAGINATION_BATCH_SIZE):
+            batch = requests[i : i + _PAGINATION_BATCH_SIZE]
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    raise NonStreamableError(
+                        f"Error fetching paginated Qobuz label metadata: {result}"
+                    )
+                status, resp = result
+                if status != 200:
+                    raise NonStreamableError(
+                        f"Error fetching paginated Qobuz label metadata: {resp.get('message', resp)}"
+                    )
+                items.extend(resp["albums"]["items"])
 
         return label_resp
 
@@ -411,15 +444,19 @@ class QobuzClient(Client):
         params: dict,
         limit: int = 500,
     ) -> list[dict]:
-        """Paginate search results.
+        """
+        Fetch paginated API pages for the given endpoint until the requested number of items is collected.
 
-        params:
-            limit: If None, all the results are yielded. Otherwise a maximum
-            of `limit` results are yielded.
+        Parameters:
+            epoint (str): API endpoint path (e.g. "track/search", "album/getFeatured").
+            params (dict): Base query parameters to send with each request; will be copied and updated for pagination.
+            limit (int | None): Maximum number of items to consider across pages; if `None`, all available items are fetched.
 
-        Returns
-        -------
-            Generator that yields (status code, response) tuples
+        Returns:
+            list[dict]: A list of page JSON objects returned by the API (the initial page is the first element).
+
+        Raises:
+            NonStreamableError: If the initial request or any subsequent page request fails or returns a non-200 status.
         """
         params.update({"limit": limit})
         status, page = await self._api_request(epoint, params)
@@ -455,12 +492,20 @@ class QobuzClient(Client):
             params.update({"offset": offset})
             requests.append(self._api_request(epoint, params.copy()))
 
-        for status, resp in await asyncio.gather(*requests):
-            if status != 200:
-                raise NonStreamableError(
-                    f"Qobuz pagination page failed ({status}) for {epoint}: {resp.get('message', resp)}"
-                )
-            pages.append(resp)
+        for i in range(0, len(requests), _PAGINATION_BATCH_SIZE):
+            batch = requests[i : i + _PAGINATION_BATCH_SIZE]
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    raise NonStreamableError(
+                        f"Qobuz pagination page failed for {epoint}: {result}"
+                    )
+                status, resp = result
+                if status != 200:
+                    raise NonStreamableError(
+                        f"Qobuz pagination page failed ({status}) for {epoint}: {resp.get('message', resp)}"
+                    )
+                pages.append(resp)
 
         return pages
 
