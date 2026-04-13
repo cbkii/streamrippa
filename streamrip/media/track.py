@@ -189,8 +189,12 @@ class Track(Media):
             )
             try:
                 os.remove(self.download_path)
-            except OSError:
-                pass
+            except OSError as rm_err:
+                logger.warning(
+                    "Could not remove corrupt FLAC file '%s': %s",
+                    self.download_path,
+                    rm_err,
+                )
             self.db.set_failed(
                 self.downloadable.source,
                 "track",
@@ -200,7 +204,7 @@ class Track(Media):
                 error=f"FLAC validation failed: {e}",
                 is_validation_failure=True,
             )
-            raise ValueError(
+            raise DownloadError(
                 f"FLAC validation failed for '{self.meta.title}': {e}"
             ) from e
 
@@ -244,14 +248,13 @@ class PendingTrack(Pending):
     cover_path: str | None
 
     async def resolve(self) -> Track | None:
-        if self.db.downloaded(self.id):
+        source = self.client.source
+        if self.db.downloaded(self.id, source=source):
             logger.info(
                 f"Skipping track {self.id}. Marked as downloaded in the database.",
             )
             self.db.set_skipped()
             return None
-
-        source = self.client.source
         try:
             resp = await self.client.get_metadata(self.id, "track")
         except NonStreamableError as e:
@@ -311,7 +314,8 @@ class PendingSingle(Pending):
     db: Database
 
     async def resolve(self) -> Track | None:
-        if self.db.downloaded(self.id):
+        source = self.client.source
+        if self.db.downloaded(self.id, source=source):
             logger.info(
                 f"Skipping track {self.id}. Marked as downloaded in the database.",
             )
@@ -322,39 +326,39 @@ class PendingSingle(Pending):
             resp = await self.client.get_metadata(self.id, "track")
         except NonStreamableError as e:
             logger.error(f"Error fetching track {self.id}: {e}")
-            self.db.set_failed(self.client.source, "track", self.id, error=str(e))
+            self.db.set_failed(source, "track", self.id, error=str(e))
             return None
         # Patch for soundcloud
         try:
-            album = AlbumMetadata.from_track_resp(resp, self.client.source)
+            album = AlbumMetadata.from_track_resp(resp, source)
         except Exception as e:
             logger.error(f"Error building album metadata for track {id=}: {e}")
-            self.db.set_failed(self.client.source, "track", self.id, error=str(e))
+            self.db.set_failed(source, "track", self.id, error=str(e))
             return None
 
         if album is None:
-            self.db.set_failed(self.client.source, "track", self.id)
+            self.db.set_failed(source, "track", self.id)
             logger.error(
-                f"Cannot stream track (am) ({self.id}) on {self.client.source}",
+                f"Cannot stream track (am) ({self.id}) on {source}",
             )
             return None
 
         try:
-            meta = TrackMetadata.from_resp(album, self.client.source, resp)
+            meta = TrackMetadata.from_resp(album, source, resp)
         except Exception as e:
             logger.error(f"Error building track metadata for track {id=}: {e}")
-            self.db.set_failed(self.client.source, "track", self.id, error=str(e))
+            self.db.set_failed(source, "track", self.id, error=str(e))
             return None
 
         if meta is None:
-            self.db.set_failed(self.client.source, "track", self.id)
+            self.db.set_failed(source, "track", self.id)
             logger.error(
-                f"Cannot stream track (tm) ({self.id}) on {self.client.source}",
+                f"Cannot stream track (tm) ({self.id}) on {source}",
             )
             return None
 
         config = self.config.session
-        quality = getattr(config, self.client.source).quality
+        quality = getattr(config, source).quality
         assert isinstance(quality, int)
         parent = config.downloads.folder
         if config.filepaths.add_singles_to_folder:

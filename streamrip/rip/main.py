@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import platform
 
 import aiofiles
@@ -429,8 +430,6 @@ class Main:
             source: Primary search source (e.g. ``"qobuz"``).
             fallback_source: Fallback search source; empty string disables fallback.
         """
-        import os as _os
-
         from ..file_lists import parse_unresolved_csv
 
         rows = parse_unresolved_csv(unresolved_csv_path)
@@ -440,10 +439,10 @@ class Main:
             )
             return
 
-        stem = _os.path.splitext(unresolved_csv_path)[0]
+        stem = os.path.splitext(unresolved_csv_path)[0]
         repair_unresolved_path = f"{stem}_repair_unresolved.csv"
 
-        playlist_name = _os.path.basename(stem)
+        playlist_name = os.path.basename(stem)
 
         await self.resolve_csv(
             playlist_name=playlist_name,

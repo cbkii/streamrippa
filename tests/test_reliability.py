@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from streamrip.db import Database, Dummy, FailedTrackLog, SessionStats
+from streamrip.exceptions import DownloadError
 
 # ---------------------------------------------------------------------------
 # Helper factories
@@ -320,7 +321,7 @@ class TestFlacValidation:
             track, db = self._make_track(validate_flac=True, download_path=corrupt_path)
 
             with patch("streamrip.media.track.tag_file", new_callable=AsyncMock):
-                with pytest.raises(ValueError, match="FLAC validation failed"):
+                with pytest.raises(DownloadError, match="FLAC validation failed"):
                     await track.postprocess()
 
             assert not os.path.exists(
