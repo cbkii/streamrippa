@@ -48,7 +48,7 @@ class DeezerClient(Client):
         arl = self.config.arl
         if not arl:
             raise MissingCredentialsError
-        success = self.client.login_via_arl(arl)
+        success = await asyncio.to_thread(self.client.login_via_arl, arl)
         if not success:
             raise AuthenticationError
         self.logged_in = True
@@ -154,7 +154,7 @@ class DeezerClient(Client):
             except AttributeError:
                 raise Exception(f"Invalid media type {media_type}")
 
-        response = search_function(query, limit=limit)  # type: ignore
+        response = await asyncio.to_thread(search_function, query, limit=limit)  # type: ignore
         if response["total"] > 0:
             return [response]
         return []
@@ -185,7 +185,12 @@ class DeezerClient(Client):
         # TODO: optimize such that all of the ids are requested at once
         dl_info: dict = {"quality": quality, "id": item_id}
 
-        track_info = self.client.gw.get_track(item_id)
+        try:
+            track_info = await asyncio.to_thread(self.client.gw.get_track, item_id)
+        except Exception as e:
+            raise NonStreamableError(
+                f"Unable to query Deezer track metadata for {item_id}: {e}"
+            )
 
         fallback_id = track_info.get("FALLBACK", {}).get("SNG_ID")
 
@@ -224,7 +229,7 @@ class DeezerClient(Client):
         token = track_info["TRACK_TOKEN"]
         try:
             logger.debug("Fetching deezer url with token %s", token)
-            url = self.client.get_track_url(token, format_str)
+            url = await asyncio.to_thread(self.client.get_track_url, token, format_str)
         except deezer.WrongLicense:
             raise NonStreamableError(
                 "The requested quality is not available with your subscription. "
@@ -239,6 +244,11 @@ class DeezerClient(Client):
             )
 
         if url is None:
+            logger.debug(
+                "Deezer media API returned no URL for %s (%s); falling back to encrypted CDN path",
+                item_id,
+                format_str,
+            )
             url = self._get_encrypted_file_url(
                 item_id,
                 track_info["MD5_ORIGIN"],

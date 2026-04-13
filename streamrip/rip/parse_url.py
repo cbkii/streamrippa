@@ -136,9 +136,15 @@ class QobuzInterpreterURL(URL):
 
 class DeezerDynamicURL(URL):
     standard_link_re = re.compile(
-        r"https://www\.deezer\.com/[a-z]{2}/(album|artist|playlist|track)/(\d+)"
+        r"https?://(?:www\.)?(?:deezer\.com|open\.deezer\.com)/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:browse/)?(album|artist|playlist|track)/(\d+)"
     )
-    dynamic_link_re = re.compile(r"https://(?:deezer|dzr)\.page\.link/\w+")
+    dynamic_link_re = re.compile(
+        r"https://(?:"
+        r"(?:deezer|dzr)\.page\.link/\w+"
+        r"|link\.deezer\.com/s/\w+"
+        r"|deezer\.link/\w+"
+        r")"
+    )
 
     @classmethod
     def from_str(cls, url: str) -> URL | None:
@@ -178,13 +184,18 @@ class DeezerDynamicURL(URL):
         :type url: str
         :rtype: Tuple[str, str] (media type, item id)
         """
-        async with client.session.get(url) as resp:
+        async with client.session.get(url, allow_redirects=True) as resp:
+            final_url = str(resp.url)
+            match = cls.standard_link_re.search(final_url)
+            if match:
+                return match.group(1), match.group(2)
+
             match = cls.standard_link_re.search(await resp.text())
 
         if match:
             return match.group(1), match.group(2)
 
-        raise Exception("Unable to extract Deezer dynamic link.")
+        raise Exception(f"Unable to extract Deezer dynamic link from {url}.")
 
 
 class SoundcloudURL(URL):

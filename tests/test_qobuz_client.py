@@ -8,7 +8,12 @@ from util import arun
 from streamrip.client.downloadable import BasicDownloadable
 from streamrip.client.qobuz import QobuzClient
 from streamrip.config import Config
-from streamrip.exceptions import MissingCredentialsError
+from streamrip.exceptions import (
+    AuthenticationError,
+    InvalidAppSecretError,
+    MissingCredentialsError,
+    NonStreamableError,
+)
 
 logger = logging.getLogger("streamrip")
 
@@ -33,8 +38,48 @@ def qobuz_client():
 
 def test_client_raises_missing_credentials():
     c = Config.defaults()
+    client = QobuzClient(c)
     with pytest.raises(MissingCredentialsError):
-        arun(QobuzClient(c).login())
+        arun(client.login())
+    arun(client.session.close())
+
+
+def test_get_downloadable_requires_login():
+    c = Config.defaults()
+    client = QobuzClient(c)
+    with pytest.raises(AuthenticationError, match="not logged in"):
+        arun(client.get_downloadable("19512574", 3))
+
+
+def test_get_downloadable_requires_secret():
+    c = Config.defaults()
+    client = QobuzClient(c)
+    client.logged_in = True
+    with pytest.raises(InvalidAppSecretError, match="Missing validated"):
+        arun(client.get_downloadable("19512574", 3))
+
+
+def test_get_downloadable_invalid_quality():
+    c = Config.defaults()
+    client = QobuzClient(c)
+    client.logged_in = True
+    client.secret = "secret"
+    with pytest.raises(NonStreamableError, match="Unsupported Qobuz quality"):
+        arun(client.get_downloadable("19512574", 0))
+
+
+def test_get_downloadable_signing_failure_status_400(monkeypatch):
+    c = Config.defaults()
+    client = QobuzClient(c)
+    client.logged_in = True
+    client.secret = "secret"
+
+    async def fake_request_file_url(*_args, **_kwargs):
+        return 400, {"message": "Invalid request_sig"}
+
+    monkeypatch.setattr(client, "_request_file_url", fake_request_file_url)
+    with pytest.raises(NonStreamableError, match="signing failure"):
+        arun(client.get_downloadable("19512574", 3))
 
 
 @pytest.mark.skipif(
