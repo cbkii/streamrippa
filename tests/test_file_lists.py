@@ -276,7 +276,7 @@ def test_score_title_album_bonus():
     score = score_candidate(
         row, "Blue in Green", "Unknown Artist", "Kind of Blue", "1959", ""
     )
-    assert 40 <= score < 60
+    assert 40 <= score < 70
 
 
 def test_score_year_bonus():
@@ -302,6 +302,30 @@ def test_score_case_insensitive():
     row = _make_row()
     score = score_candidate(row, "BLUE IN GREEN", "MILES DAVIS", "", "1959", "")
     assert score >= 60
+
+
+def test_score_variant_title_normalization():
+    row = _make_row(title="Song Name")
+    score = score_candidate(
+        row,
+        "Song Name (2011 Remaster)",
+        "Miles Davis",
+        "Kind of Blue",
+        "1959",
+        "",
+    )
+    assert score >= 55
+
+
+def test_score_multi_artist_prefers_full_coverage():
+    row = _make_row(artists=["Artist A", "Artist B"])
+    full = score_candidate(
+        row, "Blue in Green", "Artist A, Artist B", "Kind of Blue", "1959", ""
+    )
+    partial = score_candidate(
+        row, "Blue in Green", "Artist A", "Kind of Blue", "1959", ""
+    )
+    assert full > partial
 
 
 def test_normalise():

@@ -60,6 +60,16 @@ _SEARCH_LIMIT = 5
 
 # Expanded search window used in repair mode for heavier matching
 _REPAIR_SEARCH_LIMIT = 15
+_MIN_ACCEPTABLE_SCORE = 50
+_MIN_ACCEPTABLE_SCORE_REPAIR = 30
+
+
+def _session_country_hint() -> str:
+    """Best-effort country hint for unresolved CSV diagnostics.
+
+    This is intentionally lightweight/non-networked. If unset, returns empty.
+    """
+    return (os.getenv("STREAMRIP_COUNTRY_CODE") or "").strip().upper()
 
 
 @dataclass(slots=True)
@@ -75,6 +85,14 @@ class TrackCandidate:
     isrc: str
     score: int
     client: Client
+
+
+@dataclass(slots=True)
+class ResolverOutcome:
+    candidate: TrackCandidate | None
+    reason: str
+    query: str
+    strategy: str
 
 
 def _build_quality_sequence(source: str, max_quality: int) -> list[int]:
@@ -149,6 +167,44 @@ def _item_isrc(source: str, item: dict) -> str:
     return (item.get("isrc") or "").strip()
 
 
+def _build_search_queries(row: ExportifyCsvRow, source: str) -> list[tuple[str, str]]:
+    """Build deterministic layered queries for Exportify row resolution.
+
+    Returns ``[(strategy, query), ...]`` in priority order:
+    1) ISRC-led (when available) for Deezer/Qobuz.
+    2) Structured title + multiple artists + album/year hints.
+    3) Generic fallback (legacy behaviour shape).
+    """
+    artist_joined = (
+        " ".join(row.artists_list[:3]) if row.artists_list else row.artists_raw
+    )
+    year = row.release_date[:4].strip() if row.release_date else ""
+
+    queries: list[tuple[str, str]] = []
+    if row.isrc and source in {"deezer", "qobuz"}:
+        queries.append(("isrc", row.isrc))
+
+    structured_parts = [row.track_name, artist_joined, row.album, year]
+    structured = " ".join(p for p in structured_parts if p).strip()
+    if structured:
+        queries.append(("structured", structured))
+
+    generic = f"{row.track_name} {row.artists_list[0] if row.artists_list else row.artists_raw}".strip()
+    if generic:
+        queries.append(("generic", generic))
+
+    # De-dupe while preserving deterministic order.
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for strategy, query in queries:
+        qn = " ".join(query.split())
+        key = f"{strategy}:{qn}"
+        if qn and key not in seen:
+            seen.add(key)
+            out.append((strategy, qn))
+    return out
+
+
 def _pick_best_candidate(
     row: ExportifyCsvRow,
     source: str,
@@ -157,8 +213,7 @@ def _pick_best_candidate(
 ) -> TrackCandidate | None:
     """Score all results from *pages* and return the best :class:`TrackCandidate`.
 
-    Returns ``None`` if *pages* is empty or all items score 0 and the first
-    result is also unavailable.
+    Returns ``None`` if *pages* is empty.
     """
     items = _extract_raw_results(source, pages)
     if not items:
@@ -179,7 +234,7 @@ def _pick_best_candidate(
             best_score = sc
             best_item = item
 
-    if best_item is None:
+    if best_item is None or best_score <= 0:
         return None
 
     return TrackCandidate(
@@ -240,6 +295,14 @@ def _pick_best_candidate_repair(
         score=best_score,
         client=client,
     )
+
+
+def _candidate_reason(candidate: TrackCandidate | None, min_score: int) -> str:
+    if candidate is None:
+        return "no results"
+    if candidate.score < min_score:
+        return f"low confidence ({candidate.score}<{min_score})"
+    return "matched"
 
 
 def _build_extra_tags(
@@ -310,6 +373,13 @@ class _CandidateMeta:
 
 
 @dataclass(slots=True)
+class AttemptResult:
+    source: str
+    quality: int
+    status: str
+
+
+@dataclass(slots=True)
 class PendingCsvTrack(Pending):
     """A track derived from an Exportify CSV row, ready to resolve and download.
 
@@ -377,46 +447,73 @@ class PendingCsvTrack(Pending):
         if self.fallback_candidate is not None:
             fallback_meta = await self._fetch_candidate_meta(self.fallback_candidate)
 
+        attempts: list[AttemptResult] = []
+
         # If metadata could not be fetched for a candidate it is treated as unavailable.
         effective_primary = self.primary_candidate if primary_meta is not None else None
         effective_fallback = (
             self.fallback_candidate if fallback_meta is not None else None
         )
 
+        if self.primary_candidate is not None and primary_meta is None:
+            attempts.append(
+                AttemptResult(self.primary_source, -1, "matched unavailable")
+            )
+        if self.fallback_candidate is not None and fallback_meta is None:
+            attempts.append(
+                AttemptResult(self.fallback_source, -1, "matched unavailable")
+            )
+
         max_passes = max(
             len(self.primary_qualities) if effective_primary else 0,
             len(self.fallback_qualities) if effective_fallback else 0,
         )
 
+        # Pass-major fallback (quality-prioritised): each pass tries the same
+        # quality-step index across configured services before stepping down.
         for pass_idx in range(max_passes):
-            # --- Try primary service at this pass's quality ---
             if effective_primary and pass_idx < len(self.primary_qualities):
-                assert primary_meta is not None  # guaranteed above
-                track = await self._try_candidate_with_meta(
+                assert primary_meta is not None
+                quality = self.primary_qualities[pass_idx]
+                track, status = await self._try_candidate_with_meta(
                     effective_primary,
                     primary_meta,
-                    self.primary_qualities[pass_idx],
+                    quality,
+                )
+                attempts.append(
+                    AttemptResult(effective_primary.source, quality, status)
                 )
                 if track is not None:
+                    logger.info(
+                        "Resolved '%s' via %s at quality %d",
+                        self.row.track_name,
+                        effective_primary.source,
+                        quality,
+                    )
                     return track
 
-            # --- Try fallback service at this pass's quality ---
             if effective_fallback and pass_idx < len(self.fallback_qualities):
-                assert fallback_meta is not None  # guaranteed above
-                track = await self._try_candidate_with_meta(
+                assert fallback_meta is not None
+                quality = self.fallback_qualities[pass_idx]
+                track, status = await self._try_candidate_with_meta(
                     effective_fallback,
                     fallback_meta,
-                    self.fallback_qualities[pass_idx],
+                    quality,
+                )
+                attempts.append(
+                    AttemptResult(effective_fallback.source, quality, status)
                 )
                 if track is not None:
+                    logger.info(
+                        "Resolved '%s' via %s at quality %d",
+                        self.row.track_name,
+                        effective_fallback.source,
+                        quality,
+                    )
                     return track
 
         # All passes exhausted
-        reason = (
-            "no candidate found"
-            if (self.primary_candidate is None and self.fallback_candidate is None)
-            else "all quality/service combinations failed"
-        )
+        reason = self._classify_failure(attempts)
 
         logger.warning(
             "Could not download '%s' by %s (%s)",
@@ -437,9 +534,26 @@ class PendingCsvTrack(Pending):
                 fallback_source=self.fallback_source,
                 reason=reason,
                 row_index=self.row.row_index,
+                session_country=_session_country_hint(),
+                attempt_trace=" | ".join(
+                    f"{a.source}@{a.quality}:{a.status}" for a in attempts
+                ),
             )
 
         return None
+
+    @staticmethod
+    def _classify_failure(attempts: list[AttemptResult]) -> str:
+        if not attempts:
+            return "all configured service/quality combinations exhausted"
+        statuses = {a.status for a in attempts}
+        if statuses == {"matched unavailable"}:
+            return "matched item found, but unavailable on current service"
+        if "download failed" in statuses:
+            return "download attempt failed after a valid service/quality match"
+        if "quality unavailable" in statuses:
+            return "matched item available, but requested/highest quality unavailable"
+        return "all configured service/quality combinations exhausted"
 
     async def _fetch_candidate_meta(
         self,
@@ -523,7 +637,7 @@ class PendingCsvTrack(Pending):
         candidate: TrackCandidate,
         cached: _CandidateMeta,
         quality: int,
-    ) -> Track | None:
+    ) -> tuple[Track | None, str]:
         """Attempt to obtain a downloadable for *candidate* at *quality*.
 
         Uses pre-fetched metadata from *cached* — no additional API call is made.
@@ -553,7 +667,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return None, "quality unavailable"
         except Exception as e:
             logger.debug(
                 "Error getting downloadable for %s:%s: %s",
@@ -561,15 +675,18 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return None
+            return None, "download failed"
 
-        return Track(
-            cached.meta,
-            downloadable,
-            self.config,
-            self.folder,
-            embedded_cover_path,
-            self.db,
+        return (
+            Track(
+                cached.meta,
+                downloadable,
+                self.config,
+                self.folder,
+                embedded_cover_path,
+                self.db,
+            ),
+            "ok",
         )
 
     async def _download_cover(self, covers: Covers, client: Client) -> str | None:
@@ -746,57 +863,94 @@ class PendingCsvPlaylist(Pending):
         - Uses :func:`_pick_best_candidate_repair` which applies fuzzy title
           matching as a fallback when exact title matching fails.
         """
-        query = f"{row.track_name} {row.artists_list[0] if row.artists_list else row.artists_raw}"
-
         search_limit = _REPAIR_SEARCH_LIMIT if self.repair_mode else _SEARCH_LIMIT
         picker = (
             _pick_best_candidate_repair if self.repair_mode else _pick_best_candidate
         )
+        min_score = (
+            _MIN_ACCEPTABLE_SCORE_REPAIR if self.repair_mode else _MIN_ACCEPTABLE_SCORE
+        )
 
-        primary_candidate: TrackCandidate | None = None
-        fallback_candidate: TrackCandidate | None = None
+        primary_outcome = ResolverOutcome(None, "no results", "", "")
+        fallback_outcome = ResolverOutcome(None, "no results", "", "")
 
-        # Search primary service
-        try:
-            primary_pages = await self.primary_client.search(
-                "track", query, limit=search_limit
+        async def _resolve_for_client(client: Client) -> ResolverOutcome:
+            queries = _build_search_queries(row, client.source)
+            best_low_conf: tuple[str, str, TrackCandidate] | None = None
+            for strategy, query in queries:
+                try:
+                    pages = await client.search("track", query, limit=search_limit)
+                    candidate = picker(row, client.source, pages, client)
+                except Exception as e:
+                    logger.debug(
+                        "Search failed on %s (%s) for '%s': %s",
+                        client.source,
+                        strategy,
+                        query,
+                        e,
+                    )
+                    continue
+
+                reason = _candidate_reason(candidate, min_score)
+                if reason == "matched":
+                    return ResolverOutcome(candidate, reason, query, strategy)
+                if candidate is not None:
+                    if (
+                        best_low_conf is None
+                        or candidate.score > best_low_conf[2].score
+                    ):
+                        best_low_conf = (query, strategy, candidate)
+
+            if best_low_conf is not None:
+                query, strategy, candidate = best_low_conf
+                return ResolverOutcome(
+                    candidate=candidate,
+                    reason=_candidate_reason(candidate, min_score),
+                    query=query,
+                    strategy=strategy,
+                )
+            return ResolverOutcome(
+                candidate=None,
+                reason="no results",
+                query=queries[-1][1] if queries else "",
+                strategy=queries[-1][0] if queries else "",
             )
-            primary_candidate = picker(
-                row, self.primary_client.source, primary_pages, self.primary_client
-            )
-        except Exception as e:
-            logger.debug(
-                "Search failed on %s for '%s': %s",
-                self.primary_client.source,
-                query,
-                e,
-            )
+
+        primary_outcome = await _resolve_for_client(self.primary_client)
 
         # Search fallback service if configured
         if self.fallback_client is not None:
-            try:
-                fallback_pages = await self.fallback_client.search(
-                    "track", query, limit=search_limit
-                )
-                fallback_candidate = picker(
-                    row,
-                    self.fallback_client.source,
-                    fallback_pages,
-                    self.fallback_client,
-                )
-            except Exception as e:
-                logger.debug(
-                    "Search failed on %s for '%s': %s",
-                    self.fallback_client.source,
-                    query,
-                    e,
-                )
+            fallback_outcome = await _resolve_for_client(self.fallback_client)
+
+        primary_candidate = (
+            primary_outcome.candidate
+            if primary_outcome.candidate
+            and primary_outcome.candidate.score >= min_score
+            else None
+        )
+        fallback_candidate = (
+            fallback_outcome.candidate
+            if fallback_outcome.candidate
+            and fallback_outcome.candidate.score >= min_score
+            else None
+        )
 
         if primary_candidate is None and fallback_candidate is None:
+            failure_reasons = ", ".join(
+                [
+                    f"{self.primary_client.source}: {primary_outcome.reason}",
+                    (
+                        f"{self.fallback_client.source}: {fallback_outcome.reason}"
+                        if self.fallback_client
+                        else ""
+                    ),
+                ]
+            ).strip(", ")
             logger.warning(
-                "No results found for '%s' by %s",
+                "Could not confidently resolve '%s' by %s (%s)",
                 row.track_name,
                 row.artists_raw,
+                failure_reasons,
             )
             status.unresolved += 1
             if self.db.unresolved_log is not None:
@@ -811,8 +965,17 @@ class PendingCsvPlaylist(Pending):
                     fallback_source=self.fallback_client.source
                     if self.fallback_client
                     else "",
-                    reason="no search results from any service",
+                    reason=failure_reasons or "metadata mismatch",
                     row_index=row.row_index,
+                    session_country=_session_country_hint(),
+                    query_strategy=" / ".join(
+                        s
+                        for s in (primary_outcome.strategy, fallback_outcome.strategy)
+                        if s
+                    ),
+                    attempted_query=" || ".join(
+                        q for q in (primary_outcome.query, fallback_outcome.query) if q
+                    ),
                 )
             if callback:
                 await callback()

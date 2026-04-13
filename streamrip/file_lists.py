@@ -159,6 +159,95 @@ def _artist_overlap(query_artists: list[str], result_artist: str) -> bool:
     return False
 
 
+_VARIANT_MARKERS: frozenset[str] = frozenset(
+    {
+        "live",
+        "remaster",
+        "remastered",
+        "deluxe",
+        "radio edit",
+        "edit",
+        "explicit",
+        "clean",
+        "mono",
+        "stereo",
+        "version",
+        "bonus track",
+        "feat",
+        "featuring",
+        "ft",
+    }
+)
+
+
+def _normalise_variant_text(s: str) -> str:
+    """Return a normalised string with common edition/version markers removed."""
+    norm = _normalise(s)
+    if not norm:
+        return ""
+    # Remove common edition hints and standalone year tags.
+    norm = re.sub(
+        r"\b(?:remaster(?:ed)?|live|deluxe|radio edit|explicit|clean)\b", "", norm
+    )
+    norm = re.sub(r"\b(?:19|20)\d{2}\b", "", norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
+def _artist_coverage(query_artists: list[str], result_artist: str) -> float:
+    """Compute deterministic overlap ratio for multi-artist rows.
+
+    Returns:
+        Value in [0.0, 1.0] where 1.0 means every query artist was observed in
+        the candidate artist string.
+    """
+    if not query_artists:
+        return 0.0
+    norm_result = _normalise(result_artist)
+    if not norm_result:
+        return 0.0
+
+    matched = 0
+    for artist in query_artists:
+        na = _normalise(artist)
+        if na and (na in norm_result or norm_result in na):
+            matched += 1
+    return matched / len(query_artists)
+
+
+def _year_bonus(row_date: str, candidate_date: str) -> int:
+    if not row_date or not candidate_date:
+        return 0
+    try:
+        row_year = int(str(row_date)[:4])
+        cand_year = int(str(candidate_date)[:4])
+    except (TypeError, ValueError):
+        return 0
+    diff = abs(row_year - cand_year)
+    if diff == 0:
+        return 6
+    if diff == 1:
+        return 3
+    if diff == 2:
+        return 1
+    return 0
+
+
+def _variant_penalty(row_title: str, candidate_title: str) -> int:
+    row_norm = _normalise(row_title)
+    cand_norm = _normalise(candidate_title)
+    if not row_norm or not cand_norm:
+        return 0
+
+    penalty = 0
+    for marker in _VARIANT_MARKERS:
+        in_row = marker in row_norm
+        in_cand = marker in cand_norm
+        if in_row != in_cand:
+            penalty += 4
+    return min(penalty, 16)
+
+
 def score_candidate(
     row: "ExportifyCsvRow",
     candidate_title: str,
@@ -186,23 +275,44 @@ def score_candidate(
 
     norm_title = _normalise(row.track_name)
     norm_cand = _normalise(candidate_title)
-    titles_match = bool(norm_title) and norm_title == norm_cand
+    if not norm_title or not norm_cand:
+        return 0
 
-    score = 0
+    # Strong title requirement first; this keeps generic text search as fallback
+    # but prevents unrelated tracks from winning on weak metadata overlap.
+    titles_match = norm_title == norm_cand
+    variant_titles_match = _normalise_variant_text(
+        row.track_name
+    ) == _normalise_variant_text(candidate_title)
+
+    if not titles_match and not variant_titles_match:
+        return 0
+
+    score = 42
     if titles_match:
-        if _artist_overlap(row.artists_list, candidate_artist):
-            score = 60
-        elif row.album and _normalise(row.album) in _normalise(candidate_album):
-            score = 50
-        else:
-            score = 40
+        score += 8
 
-    # Release year bonus
-    if score > 0 and row.release_date and candidate_date:
-        if row.release_date[:4] == str(candidate_date)[:4]:
-            score += 5
+    coverage = _artist_coverage(row.artists_list, candidate_artist)
+    if coverage >= 1.0:
+        score += 24
+    elif coverage >= 0.5:
+        score += 14
+    elif _artist_overlap(row.artists_list, candidate_artist):
+        score += 8
 
-    return score
+    if row.album and candidate_album:
+        row_album = _normalise_variant_text(row.album)
+        cand_album = _normalise_variant_text(candidate_album)
+        if row_album and cand_album:
+            if row_album == cand_album:
+                score += 10
+            elif row_album in cand_album or cand_album in row_album:
+                score += 6
+
+    score += _year_bonus(row.release_date, candidate_date)
+    score -= _variant_penalty(row.track_name, candidate_title)
+
+    return max(score, 1)
 
 
 def score_candidate_repair(
