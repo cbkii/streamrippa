@@ -48,6 +48,8 @@ class ExportifyCsvRow:
     position: int
     # 0-based index of this row in the file (for deterministic logging)
     row_index: int
+    # Optional provider-ID hints from unresolved CSV logs: {source: track_id}
+    repair_candidate_ids: dict[str, str] | None = None
 
 
 def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
@@ -395,6 +397,18 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
             except (ValueError, TypeError):
                 position = i + 1
 
+            repair_candidate_ids: dict[str, str] | None = None
+            primary_source = (row.get("primary_source") or "").strip()
+            fallback_source = (row.get("fallback_source") or "").strip()
+            primary_candidate_id = (row.get("primary_candidate_id") or "").strip()
+            fallback_candidate_id = (row.get("fallback_candidate_id") or "").strip()
+            if primary_source and primary_candidate_id:
+                repair_candidate_ids = {primary_source: primary_candidate_id}
+            if fallback_source and fallback_candidate_id:
+                if repair_candidate_ids is None:
+                    repair_candidate_ids = {}
+                repair_candidate_ids[fallback_source] = fallback_candidate_id
+
             rows.append(
                 ExportifyCsvRow(
                     track_name=(row.get("track_name") or "").strip(),
@@ -409,6 +423,7 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
                     tempo="",
                     position=position,
                     row_index=i,
+                    repair_candidate_ids=repair_candidate_ids,
                 )
             )
     return rows

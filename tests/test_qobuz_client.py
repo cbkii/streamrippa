@@ -6,7 +6,7 @@ import pytest
 from util import arun
 
 from streamrip.client.downloadable import BasicDownloadable
-from streamrip.client.qobuz import QobuzClient
+from streamrip.client.qobuz import QobuzClient, QobuzSpoofer
 from streamrip.config import Config
 from streamrip.exceptions import (
     AuthenticationError,
@@ -16,6 +16,14 @@ from streamrip.exceptions import (
 )
 
 logger = logging.getLogger("streamrip")
+
+
+@pytest.fixture
+def client():
+    qobuz_client = QobuzClient(Config.defaults())
+    yield qobuz_client
+    if hasattr(qobuz_client, "session") and qobuz_client.session is not None:
+        arun(qobuz_client.session.close())
 
 
 @pytest.fixture(scope="session")
@@ -36,41 +44,30 @@ def qobuz_client():
     arun(client.session.close())
 
 
-def test_client_raises_missing_credentials():
-    c = Config.defaults()
-    client = QobuzClient(c)
+def test_client_raises_missing_credentials(client):
     with pytest.raises(MissingCredentialsError):
         arun(client.login())
-    arun(client.session.close())
 
 
-def test_get_downloadable_requires_login():
-    c = Config.defaults()
-    client = QobuzClient(c)
+def test_get_downloadable_requires_login(client):
     with pytest.raises(AuthenticationError, match="not logged in"):
         arun(client.get_downloadable("19512574", 3))
 
 
-def test_get_downloadable_requires_secret():
-    c = Config.defaults()
-    client = QobuzClient(c)
+def test_get_downloadable_requires_secret(client):
     client.logged_in = True
     with pytest.raises(InvalidAppSecretError, match="Missing validated"):
         arun(client.get_downloadable("19512574", 3))
 
 
-def test_get_downloadable_invalid_quality():
-    c = Config.defaults()
-    client = QobuzClient(c)
+def test_get_downloadable_invalid_quality(client):
     client.logged_in = True
     client.secret = "secret"
     with pytest.raises(NonStreamableError, match="Unsupported Qobuz quality"):
         arun(client.get_downloadable("19512574", 0))
 
 
-def test_get_downloadable_signing_failure_status_400(monkeypatch):
-    c = Config.defaults()
-    client = QobuzClient(c)
+def test_get_downloadable_signing_failure_status_400(monkeypatch, client):
     client.logged_in = True
     client.secret = "secret"
 
@@ -80,6 +77,24 @@ def test_get_downloadable_signing_failure_status_400(monkeypatch):
     monkeypatch.setattr(client, "_request_file_url", fake_request_file_url)
     with pytest.raises(NonStreamableError, match="signing failure"):
         arun(client.get_downloadable("19512574", 3))
+
+
+def test_extract_bundle_urls_normalizes_and_filters_js_paths():
+    login_page = """
+    <html>
+      <script src="/resources/abc.bundle.js?v=1"></script>
+      <script src="//play.qobuz.com/resources/def.bundle.js?cache=2"></script>
+      <script src="https://cdn.qobuz.com/resources/ghi.bundle.js?x=3#hash"></script>
+      <script src="/resources/not-js.css?v=1"></script>
+      <script src="/app.bundle.js?v=1"></script>
+    </html>
+    """
+
+    assert QobuzSpoofer._extract_bundle_urls(login_page) == [
+        "https://play.qobuz.com/resources/abc.bundle.js?v=1",
+        "https://play.qobuz.com/resources/def.bundle.js?cache=2",
+        "https://cdn.qobuz.com/resources/ghi.bundle.js?x=3",
+    ]
 
 
 @pytest.mark.skipif(

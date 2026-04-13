@@ -1169,6 +1169,71 @@ async def test_repair_mode_uses_expanded_search_limit():
 
 
 @pytest.mark.asyncio
+async def test_repair_mode_tries_candidate_id_hint_before_search():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    row = _make_row(row_index=0)
+    row.repair_candidate_ids = {"qobuz": "hinted-id"}
+
+    primary_client.get_metadata = AsyncMock(
+        return_value={
+            "id": "hinted-id",
+            "title": "Song",
+            "performer": {"name": "Artist"},
+            "album": {"title": "Album"},
+            "release_date_original": "2020-01-01",
+            "isrc": "",
+        }
+    )
+    primary_client.search = AsyncMock(return_value=[])
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+        repair_mode=True,
+    )
+
+    await pending.resolve()
+
+    primary_client.get_metadata.assert_awaited_once_with("hinted-id", "track")
+    primary_client.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_repair_mode_falls_back_to_search_when_candidate_id_hint_fails():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    row = _make_row(row_index=0)
+    row.repair_candidate_ids = {"qobuz": "stale-id"}
+
+    primary_client.get_metadata = AsyncMock(side_effect=Exception("not found"))
+    primary_client.search = AsyncMock(return_value=[])
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+        repair_mode=True,
+    )
+
+    await pending.resolve()
+
+    primary_client.get_metadata.assert_awaited_once_with("stale-id", "track")
+    primary_client.search.assert_called()
+
+
+@pytest.mark.asyncio
 async def test_normal_mode_uses_standard_search_limit():
     """In normal mode (repair_mode=False), the standard _SEARCH_LIMIT is used."""
     import streamrip.media.csv_playlist as csv_mod
@@ -1228,6 +1293,8 @@ def test_parse_unresolved_csv_round_trip(tmp_path):
         spotify_uri="spotify:track:abc123",
         primary_source="qobuz",
         fallback_source="deezer",
+        primary_candidate_id="1234",
+        fallback_candidate_id="5678",
         reason="all quality/service combinations failed",
         row_index=0,
     )
@@ -1256,10 +1323,12 @@ def test_parse_unresolved_csv_round_trip(tmp_path):
     assert row0.release_date == "1959"
     assert row0.isrc == "US-ABC-12-34567"
     assert row0.spotify_uri == "spotify:track:abc123"
+    assert row0.repair_candidate_ids == {"qobuz": "1234", "deezer": "5678"}
 
     row1 = rows[1]
     assert row1.track_name == "So What"
     assert row1.isrc == ""
+    assert row1.repair_candidate_ids is None
 
 
 def test_parse_unresolved_csv_empty_file(tmp_path):

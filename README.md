@@ -25,6 +25,7 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 - **FLAC integrity validation** — corrupt FLAC files are detected with `mutagen`, removed, and recorded for replay
 - **Persistent failed-item tracking** — every failure is written to the SQLite failed-downloads database and an auditable CSV log
 - **`rip repair`** — replay all previously failed items without redoing successful ones
+- **`rip repair-csv`** — retry unresolved Exportify CSV rows with expanded search + fuzzy matching
 - **Session summary** — every run ends with a concise table: succeeded / failed / skipped / retried / validation-failures
 - **Non-zero exit codes** — the process exits with code 1 when any item fails, making scripted/CI use reliable
 - **`--fail-fast`** — stop after the first failure for strict pipelines
@@ -33,7 +34,10 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 
 Ensure **Python 3.10+** is installed. `ffmpeg` is recommended; some features are limited without it.
 
-This fork is **not published to PyPI**. Install it from the wheel (`.whl`) attached to the [latest GitHub Release](https://github.com/cbkii/streamrippa/releases/latest).
+This fork is **not published to PyPI**. Install it from release assets attached to the [latest GitHub Release](https://github.com/cbkii/streamrippa/releases/latest):
+
+- wheel (`.whl`) — easiest for direct install/upgrade
+- source distribution (`.tar.gz`) — useful for source-based packaging workflows
 
 ### Debian / Raspberry Pi OS packages
 
@@ -51,7 +55,7 @@ python -m pip install --upgrade pip
 python -m pip install /path/to/streamrip-<version>-py3-none-any.whl
 ```
 
-Or install directly from the release URL:
+Or install directly from a release asset URL:
 
 ```bash
 python -m pip install "https://github.com/cbkii/streamrippa/releases/download/v<version>/streamrip-<version>-py3-none-any.whl"
@@ -261,6 +265,19 @@ For each CSV row, streamrip:
 **Unresolved tracks** (no match found on any service) are logged to a CSV file next to
 the input file (e.g. `Liked_Songs_unresolved.csv`) for audit. These are separate from
 provider-backed download failures tracked by `rip repair`.
+
+#### Repair unresolved Exportify rows
+
+```bash
+rip repair-csv Liked_Songs_unresolved.csv
+rip repair-csv --source qobuz --fallback-source deezer Liked_Songs_unresolved.csv
+```
+
+`rip repair-csv` re-runs unresolved rows using a larger search window and fuzzy title
+matching, then writes a new audit file (`*_repair_unresolved.csv`) for anything still
+unresolved. When unresolved logs include provider candidate IDs, repair mode attempts
+those IDs first, then falls back to normal search/matching if they no longer resolve.
+Re-running repair passes is safe and keeps logs separate per pass.
 
 **Exportify column metadata mapping:**
 

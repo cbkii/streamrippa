@@ -1,11 +1,13 @@
 import asyncio
 import base64
+import binascii
 import hashlib
 import logging
 import re
 import time
 from collections import OrderedDict
 from typing import List, Optional
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 
@@ -67,11 +69,26 @@ class QobuzSpoofer:
     @staticmethod
     def _extract_bundle_urls(login_page: str) -> list[str]:
         script_paths = re.findall(r'<script[^>]+src="([^"]+)"', login_page)
-        return [
-            path
-            for path in script_paths
-            if "/resources/" in path and path.endswith(".js")
-        ]
+        normalized = []
+        for path in script_paths:
+            parsed = urlparse(path)
+            script_path = parsed.path
+            if "/resources/" not in script_path or not script_path.endswith(".js"):
+                continue
+            normalized.append(QobuzSpoofer._normalize_script_url(path))
+
+        return normalized
+
+    @staticmethod
+    def _normalize_script_url(src: str) -> str:
+        if src.startswith("//"):
+            parsed = urlparse(f"https:{src}")
+        elif src.startswith(("http://", "https://")):
+            parsed = urlparse(src)
+        else:
+            parsed = urlparse(urljoin("https://play.qobuz.com", src))
+
+        return parsed._replace(fragment="").geturl()
 
     def _extract_app_id_and_secrets_from_bundle(
         self, bundle: str
@@ -103,9 +120,13 @@ class QobuzSpoofer:
             secrets[timezone.lower()] += [info, extras]
 
         for secret_pair in secrets:
-            secrets[secret_pair] = base64.standard_b64decode(
-                "".join(secrets[secret_pair])[:-44],
-            ).decode("utf-8")
+            try:
+                secrets[secret_pair] = base64.standard_b64decode(
+                    "".join(secrets[secret_pair])[:-44],
+                ).decode("utf-8")
+            except (ValueError, binascii.Error, UnicodeDecodeError):
+                secrets[secret_pair] = ""
+                continue
 
         vals: List[str] = list(secrets.values())
         if "" in vals:
@@ -127,7 +148,7 @@ class QobuzSpoofer:
 
         prioritized = sorted(bundle_urls, key=lambda p: ("bundle" not in p, p))
         for bundle_url in prioritized:
-            async with self.session.get("https://play.qobuz.com" + bundle_url) as req:
+            async with self.session.get(bundle_url) as req:
                 bundle = await req.text()
             try:
                 return self._extract_app_id_and_secrets_from_bundle(bundle)
@@ -168,21 +189,22 @@ class QobuzClient(Client):
         self._spoof_cache: tuple[str, list[str]] | None = None
 
     async def login(self):
-        self.session = await self.get_session(
-            verify_ssl=self.config.session.downloads.verify_ssl
-        )
         """User credentials require either a user token OR a user email & password.
 
         A hash of the password is stored in self.config.qobuz.password_or_token.
         This data as well as the app_id is passed to self._get_user_auth_token() to get
         the actual credentials for the user.
         """
+        if self.logged_in:
+            raise AuthenticationError("Already logged in to Qobuz in this session")
+
         c = self.config.session.qobuz
         if not c.email_or_userid or not c.password_or_token:
             raise MissingCredentialsError
 
-        if self.logged_in:
-            raise AuthenticationError("Already logged in to Qobuz in this session")
+        self.session = await self.get_session(
+            verify_ssl=self.config.session.downloads.verify_ssl
+        )
 
         if not c.app_id or not c.secrets:
             logger.info("App id/secrets not found, fetching")
