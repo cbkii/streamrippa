@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -401,6 +402,19 @@ def config():
     """Manage configuration files."""
 
 
+def _open_with_editor(config_path: str) -> bool:
+    for env_var in ("VISUAL", "EDITOR"):
+        editor = os.environ.get(env_var)
+        if editor:
+            subprocess.run([*shlex.split(editor), config_path])
+            return True
+    for editor in ("nvim", "vim", "nano"):
+        if shutil.which(editor) is not None:
+            subprocess.run([editor, config_path])
+            return True
+    return False
+
+
 @config.command("open")
 @click.option("-v", "--vim", help="Open in (Neo)Vim", is_flag=True)
 @click.pass_context
@@ -416,9 +430,17 @@ def config_open(ctx, vim):
             subprocess.run(["vim", config_path])
         else:
             logger.error("Could not find nvim or vim. Using default launcher.")
-            click.launch(config_path)
+            if not click.launch(config_path):
+                logger.error(
+                    'Could not launch config file. Set $EDITOR and run "rip config open" again.',
+                )
     else:
-        click.launch(config_path)
+        if _open_with_editor(config_path):
+            return
+        if not click.launch(config_path):
+            logger.error(
+                'Could not launch config file. Set $EDITOR and run "rip config open" again.',
+            )
 
 
 @config.command("reset")
