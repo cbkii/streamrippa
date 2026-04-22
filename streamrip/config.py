@@ -297,7 +297,7 @@ class ConfigData:
     def from_toml(cls, toml_str: str):
         # TODO: handle the mistake where Windows people forget to escape backslash
         toml = parse(toml_str)
-        with open(BLANK_CONFIG_PATH) as f:
+        with open(BLANK_CONFIG_PATH, encoding="utf-8") as f:
             default_toml = parse(f.read())
         toml_set_user_defaults(default_toml)
 
@@ -428,7 +428,10 @@ def _build_dataclass_config(
     config_cls,
 ):
     """Build a config dataclass, backfilling missing keys from defaults."""
-    user_section = user_toml.get(section, {})
+    if section not in user_toml:
+        user_toml[section] = copy.deepcopy(default_toml[section])
+
+    user_section = user_toml[section]
     default_section = default_toml[section]
     data = {}
     for field in fields(config_cls):
