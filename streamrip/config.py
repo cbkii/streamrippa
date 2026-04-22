@@ -297,27 +297,59 @@ class ConfigData:
     def from_toml(cls, toml_str: str):
         # TODO: handle the mistake where Windows people forget to escape backslash
         toml = parse(toml_str)
+        with open(BLANK_CONFIG_PATH, encoding="utf-8") as f:
+            default_toml = parse(f.read())
+        toml_set_user_defaults(default_toml)
+
         if (v := toml["misc"]["version"]) != CURRENT_CONFIG_VERSION:  # type: ignore
             raise OutdatedConfigError(
                 f"Need to update config from {v} to {CURRENT_CONFIG_VERSION}",
             )
 
-        downloads = DownloadsConfig(**toml["downloads"])  # type: ignore
-        qobuz = QobuzConfig(**toml["qobuz"])  # type: ignore
-        tidal = TidalConfig(**toml["tidal"])  # type: ignore
-        deezer = DeezerConfig(**toml["deezer"])  # type: ignore
-        soundcloud = SoundcloudConfig(**toml["soundcloud"])  # type: ignore
-        youtube = YoutubeConfig(**toml["youtube"])  # type: ignore
-        lastfm = LastFmConfig(**toml["lastfm"])  # type: ignore
-        artwork = ArtworkConfig(**toml["artwork"])  # type: ignore
-        filepaths = FilepathsConfig(**toml["filepaths"])  # type: ignore
-        metadata = MetadataConfig(**toml["metadata"])  # type: ignore
-        qobuz_filters = QobuzDiscographyFilterConfig(**toml["qobuz_filters"])  # type: ignore
-        cli = CliConfig(**toml["cli"])  # type: ignore
-        database = DatabaseConfig(**toml["database"])  # type: ignore
-        reliability = ReliabilityConfig(**toml["reliability"])  # type: ignore
-        conversion = ConversionConfig(**toml["conversion"])  # type: ignore
-        misc = MiscConfig(**toml["misc"])  # type: ignore
+        downloads = _build_dataclass_config(
+            toml, default_toml, "downloads", DownloadsConfig
+        )
+        qobuz = _build_dataclass_config(toml, default_toml, "qobuz", QobuzConfig)
+        tidal = _build_dataclass_config(toml, default_toml, "tidal", TidalConfig)
+        deezer = _build_dataclass_config(toml, default_toml, "deezer", DeezerConfig)
+        soundcloud = _build_dataclass_config(
+            toml,
+            default_toml,
+            "soundcloud",
+            SoundcloudConfig,
+        )
+        youtube = _build_dataclass_config(toml, default_toml, "youtube", YoutubeConfig)
+        lastfm = _build_dataclass_config(toml, default_toml, "lastfm", LastFmConfig)
+        artwork = _build_dataclass_config(toml, default_toml, "artwork", ArtworkConfig)
+        filepaths = _build_dataclass_config(
+            toml, default_toml, "filepaths", FilepathsConfig
+        )
+        metadata = _build_dataclass_config(
+            toml, default_toml, "metadata", MetadataConfig
+        )
+        qobuz_filters = _build_dataclass_config(
+            toml,
+            default_toml,
+            "qobuz_filters",
+            QobuzDiscographyFilterConfig,
+        )
+        cli = _build_dataclass_config(toml, default_toml, "cli", CliConfig)
+        database = _build_dataclass_config(
+            toml, default_toml, "database", DatabaseConfig
+        )
+        reliability = _build_dataclass_config(
+            toml,
+            default_toml,
+            "reliability",
+            ReliabilityConfig,
+        )
+        conversion = _build_dataclass_config(
+            toml,
+            default_toml,
+            "conversion",
+            ConversionConfig,
+        )
+        misc = _build_dataclass_config(toml, default_toml, "misc", MiscConfig)
 
         return cls(
             toml=toml,
@@ -387,6 +419,27 @@ class ConfigData:
 def update_toml_section_from_config(toml_section, config):
     for field in fields(config):
         toml_section[field.name] = getattr(config, field.name)
+
+
+def _build_dataclass_config(
+    user_toml: TOMLDocument,
+    default_toml: TOMLDocument,
+    section: str,
+    config_cls,
+):
+    """Build a config dataclass, backfilling missing keys from defaults."""
+    if section not in user_toml:
+        user_toml[section] = copy.deepcopy(default_toml[section])
+
+    user_section = user_toml[section]
+    default_section = default_toml[section]
+    data = {}
+    for field in fields(config_cls):
+        if field.name in user_section:
+            data[field.name] = user_section[field.name]
+        else:
+            data[field.name] = copy.deepcopy(default_section[field.name])
+    return config_cls(**data)
 
 
 class Config:

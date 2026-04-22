@@ -304,6 +304,35 @@ def test_config_dont_update_without_set_modified():
     assert conf2.session.downloads.folder == "test_folder"
 
 
+def test_config_backfills_missing_metadata_exportify_tag_map():
+    with open(SAMPLE_CONFIG) as f:
+        toml = tomlkit.parse(f.read())
+
+    del toml["metadata"]["exportify_tag_map"]  # type: ignore
+    cfg = ConfigData.from_toml(tomlkit.dumps(toml))
+
+    assert cfg.metadata.exportify_tag_map == {
+        "Genres": "genre",
+        "Loudness": "exportify_loudness",
+        "Tempo": "tempo",
+    }
+
+
+def test_config_backfills_missing_metadata_section():
+    with open(SAMPLE_CONFIG) as f:
+        toml = tomlkit.parse(f.read())
+
+    del toml["metadata"]  # type: ignore
+    cfg = ConfigData.from_toml(tomlkit.dumps(toml))
+
+    assert cfg.metadata.exclude == []
+    assert cfg.metadata.exportify_tag_map == {
+        "Genres": "genre",
+        "Loudness": "exportify_loudness",
+        "Tempo": "tempo",
+    }
+
+
 # Other tests for the Config class can be added as needed
 
 if __name__ == "__main__":
