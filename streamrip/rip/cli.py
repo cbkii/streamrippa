@@ -406,8 +406,11 @@ def _open_with_editor(config_path: str) -> bool:
     for env_var in ("VISUAL", "EDITOR"):
         editor = os.environ.get(env_var)
         if editor:
-            subprocess.run([*shlex.split(editor), config_path])
-            return True
+            try:
+                subprocess.run([*shlex.split(editor), config_path])
+                return True
+            except (OSError, subprocess.SubprocessError):
+                pass
     for editor in ("nvim", "vim", "nano"):
         if shutil.which(editor) is not None:
             subprocess.run([editor, config_path])
@@ -430,14 +433,14 @@ def config_open(ctx, vim):
             subprocess.run(["vim", config_path])
         else:
             logger.error("Could not find nvim or vim. Using default launcher.")
-            if not click.launch(config_path):
+            if click.launch(config_path) != 0:
                 logger.error(
                     'Could not launch config file. Set $EDITOR and run "rip config open" again.',
                 )
     else:
         if _open_with_editor(config_path):
             return
-        if not click.launch(config_path):
+        if click.launch(config_path) != 0:
             logger.error(
                 'Could not launch config file. Set $EDITOR and run "rip config open" again.',
             )
