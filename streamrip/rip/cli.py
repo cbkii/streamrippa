@@ -141,7 +141,7 @@ def rip(
             suppress=[
                 click,
             ],
-            show_locals=True,
+            show_locals=False,
             locals_hide_sunder=False,
         )
         logger.setLevel(logging.DEBUG)
@@ -351,8 +351,15 @@ async def file(ctx, path, list_mode, source, fallback_source):
                     await main.resolve()
 
                 elif effective_mode == "exportify-csv":
-                    from ..file_lists import parse_exportify_csv
+                    from ..file_lists import (
+                        backup_and_sort_exportify_csv,
+                        parse_exportify_csv,
+                    )
 
+                    backup_path = backup_and_sort_exportify_csv(path)
+                    console.print(
+                        f"Created/using CSV backup at [cyan]{backup_path}[/cyan] and sorted working CSV by artist."
+                    )
                     playlist_name, rows = parse_exportify_csv(path)
                     if not rows:
                         console.print("[red]No rows found in CSV file.[/red]")

@@ -27,6 +27,20 @@ logger = logging.getLogger("streamrip")
 
 QOBUZ_BASE_URL = "https://www.qobuz.com/api.json/0.2"
 _PAGINATION_BATCH_SIZE = 10
+_REDACTED = "***REDACTED***"
+_SENSITIVE_PARAM_KEYS: frozenset[str] = frozenset(
+    {
+        "email",
+        "password",
+        "password_or_token",
+        "user_id",
+        "userid",
+        "user_auth_token",
+        "request_sig",
+        "secret",
+        "app_secret",
+    }
+)
 
 QOBUZ_FEATURED_KEYS = {
     "most-streamed",
@@ -244,9 +258,9 @@ class QobuzClient(Client):
                 "app_id": str(c.app_id),
             }
 
-        logger.debug("Request params %s", params)
+        logger.debug("Login request params: %s", self._redact_sensitive_mapping(params))
         status, resp = await self._api_request("user/login", params)
-        logger.debug("Login resp: %s", resp)
+        logger.debug("Login response summary: %s", self._login_response_summary(resp))
 
         if status == 401:
             raise AuthenticationError("Qobuz rejected credentials or user token")
@@ -291,7 +305,10 @@ class QobuzClient(Client):
         if media_type in extras:
             params.update({"extra": extras[media_type]})
 
-        logger.debug("request params: %s", params)
+        logger.debug(
+            "Qobuz metadata request params: %s",
+            self._redact_sensitive_mapping(params),
+        )
 
         epoint = f"{media_type}/get"
 
@@ -551,9 +568,7 @@ class QobuzClient(Client):
         quality = self.get_quality(quality)
         unix_ts = int(time.time())
         r_sig = f"trackgetFileUrlformat_id{quality}intentstreamtrack_id{track_id}{unix_ts}{secret}"
-        logger.debug("Raw request signature: %s", r_sig)
         r_sig_hashed = hashlib.md5(r_sig.encode("utf-8")).hexdigest()
-        logger.debug("Hashed request signature: %s", r_sig_hashed)
         params = {
             "request_ts": unix_ts,
             "request_sig": r_sig_hashed,
@@ -568,10 +583,39 @@ class QobuzClient(Client):
         returns: status code, json parsed response
         """
         url = f"{QOBUZ_BASE_URL}/{epoint}"
-        logger.debug("api_request: endpoint=%s, params=%s", epoint, params)
+        logger.debug(
+            "api_request: endpoint=%s, params=%s",
+            epoint,
+            self._redact_sensitive_mapping(params),
+        )
         async with self.rate_limiter:
             async with self.session.get(url, params=params) as response:
                 return response.status, await response.json()
+
+    @staticmethod
+    def _redact_sensitive_mapping(payload: dict) -> dict:
+        """Redact sensitive keys in a flat mapping.
+
+        Only top-level keys are redacted; nested dictionaries are not traversed.
+        """
+        redacted: dict = {}
+        for key, value in payload.items():
+            if key.lower() in _SENSITIVE_PARAM_KEYS:
+                redacted[key] = _REDACTED
+            else:
+                redacted[key] = value
+        return redacted
+
+    @staticmethod
+    def _login_response_summary(resp: dict) -> dict:
+        user = resp.get("user") or {}
+        credential = user.get("credential") or {}
+        return {
+            "has_user_id": bool(user.get("id")),
+            "has_email": bool(user.get("email")),
+            "has_user_auth_token": bool(resp.get("user_auth_token")),
+            "credential_parameters_present": bool(credential.get("parameters")),
+        }
 
     @staticmethod
     def get_quality(quality: int):

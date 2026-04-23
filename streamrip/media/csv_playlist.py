@@ -41,7 +41,13 @@ from ..config import Config
 from ..console import console
 from ..db import Database
 from ..exceptions import NonStreamableError
-from ..file_lists import ExportifyCsvRow, score_candidate, score_candidate_repair
+from ..file_lists import (
+    ExportifyCsvRow,
+    is_usable_exportify_row,
+    score_candidate,
+    score_candidate_repair,
+    strip_title_decorators,
+)
 from ..filepath_utils import clean_filepath
 from ..metadata import AlbumMetadata, Covers, TrackMetadata
 from .artwork import download_artwork
@@ -56,7 +62,7 @@ logger = logging.getLogger("streamrip")
 _RESOLVER_BATCH_SIZE = 10
 
 # Number of search results to fetch per service per row (normal import path)
-_SEARCH_LIMIT = 5
+_SEARCH_LIMIT = 8
 
 # Expanded search window used in repair mode for heavier matching
 _REPAIR_SEARCH_LIMIT = 15
@@ -175,23 +181,35 @@ def _build_search_queries(row: ExportifyCsvRow, source: str) -> list[tuple[str, 
     2) Structured title + multiple artists + album/year hints.
     3) Generic fallback (legacy behaviour shape).
     """
-    artist_joined = (
-        " ".join(row.artists_list[:3]) if row.artists_list else row.artists_raw
-    )
+    first_artist = row.artists_list[0] if row.artists_list else row.artists_raw
+    artist_joined = " ".join(row.artists_list[:2]) if row.artists_list else first_artist
     year = row.release_date[:4].strip() if row.release_date else ""
+    stripped_title = strip_title_decorators(row.track_name)
 
     queries: list[tuple[str, str]] = []
     if row.isrc and source in {"deezer", "qobuz"}:
         queries.append(("isrc", row.isrc))
 
-    structured_parts = [row.track_name, artist_joined, row.album, year]
-    structured = " ".join(p for p in structured_parts if p).strip()
+    structured = " ".join(
+        p for p in [row.track_name, artist_joined, row.album, year] if p
+    ).strip()
     if structured:
         queries.append(("structured", structured))
 
-    generic = f"{row.track_name} {row.artists_list[0] if row.artists_list else row.artists_raw}".strip()
+    if stripped_title and stripped_title != row.track_name:
+        stripped_structured = " ".join(
+            p for p in [stripped_title, first_artist, row.album, year] if p
+        ).strip()
+        if stripped_structured:
+            queries.append(("stripped-structured", stripped_structured))
+
+    generic = f"{row.track_name} {first_artist}".strip()
     if generic:
         queries.append(("generic", generic))
+    if stripped_title and stripped_title != row.track_name:
+        stripped_generic = f"{stripped_title} {first_artist}".strip()
+        if stripped_generic:
+            queries.append(("stripped-generic", stripped_generic))
 
     # De-dupe while preserving deterministic order.
     seen: set[str] = set()
@@ -580,7 +598,9 @@ class PendingCsvTrack(Pending):
         if not attempts:
             return "all configured service/quality combinations exhausted"
         statuses = {a.status for a in attempts}
-        if statuses == {"matched unavailable"}:
+        if "matched unavailable" in statuses and not (
+            "download failed" in statuses or "provider-error" in statuses
+        ):
             return "matched item found, but unavailable on current service"
         if "download failed" in statuses:
             return "download attempt failed after a valid service/quality match"
@@ -632,7 +652,7 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 e,
             )
-            return _MetaFetchResult(status="provider-error")
+            return _MetaFetchResult(status="matched unavailable")
         except Exception as e:
             logger.debug(
                 "Unexpected error fetching metadata for %s:%s: %s",
@@ -803,6 +823,9 @@ class PendingCsvPlaylist(Pending):
                 ")",
             )
 
+    class FailFastAbortError(RuntimeError):
+        """Raised when fail-fast mode aborts CSV row resolution for a batch."""
+
     async def resolve(self) -> Playlist | None:
         parent = self.config.session.downloads.folder
         folder = os.path.join(parent, clean_filepath(self.playlist_name))
@@ -861,10 +884,9 @@ class PendingCsvPlaylist(Pending):
                 for batch in _chunks(self.rows, _RESOLVER_BATCH_SIZE):
                     results = await _resolve_batch(batch)
                     if _handle_batch_results(results):
-                        logger.warning(
-                            "fail_fast: stopping CSV resolver after batch error."
-                        )
-                        break
+                        message = "fail_fast: stopping CSV resolver after batch error."
+                        logger.warning(message)
+                        raise self.FailFastAbortError(message)
         else:
 
             async def _resolve_row_plain(row):
@@ -881,10 +903,9 @@ class PendingCsvPlaylist(Pending):
                 coros = [_resolve_row_plain(row) for row in batch]
                 results = await asyncio.gather(*coros, return_exceptions=True)
                 if _handle_batch_results(results):
-                    logger.warning(
-                        "fail_fast: stopping CSV resolver after batch error."
-                    )
-                    break
+                    message = "fail_fast: stopping CSV resolver after batch error."
+                    logger.warning(message)
+                    raise self.FailFastAbortError(message)
 
         logger.info(
             "CSV resolve complete: %d found, %d failed, %d unresolved out of %d rows",
@@ -934,6 +955,30 @@ class PendingCsvPlaylist(Pending):
 
         primary_outcome = ResolverOutcome(None, "no results", "", "")
         fallback_outcome = ResolverOutcome(None, "no results", "", "")
+
+        if not is_usable_exportify_row(row):
+            reason = "invalid row: missing track name or artist"
+            logger.warning("Skipping unresolved CSV row %d (%s)", row.row_index, reason)
+            status.unresolved += 1
+            if self.db.unresolved_log is not None:
+                self.db.unresolved_log.log(
+                    track_name=row.track_name,
+                    artists=row.artists_raw,
+                    album=row.album,
+                    release_date=row.release_date,
+                    isrc=row.isrc,
+                    spotify_uri=row.spotify_uri,
+                    primary_source=self.primary_client.source,
+                    fallback_source=self.fallback_client.source
+                    if self.fallback_client
+                    else "",
+                    reason=reason,
+                    row_index=row.row_index,
+                    session_country=_session_country_hint(),
+                )
+            if callback:
+                await callback()
+            return None
 
         async def _resolve_for_client(client: Client) -> ResolverOutcome:
             """
@@ -1059,7 +1104,10 @@ class PendingCsvPlaylist(Pending):
         primary_outcome = await _resolve_for_client(self.primary_client)
 
         # Search fallback service if configured
-        if self.fallback_client is not None:
+        if self.fallback_client is not None and not (
+            primary_outcome.candidate is not None
+            and primary_outcome.candidate.score >= min_score
+        ):
             fallback_outcome = await _resolve_for_client(self.fallback_client)
 
         primary_candidate = (

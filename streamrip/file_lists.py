@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shutil
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -50,6 +51,63 @@ class ExportifyCsvRow:
     row_index: int
     # Optional provider-ID hints from unresolved CSV logs: {source: track_id}
     repair_candidate_ids: dict[str, str] | None = None
+
+
+def _artist_sort_key(value: str) -> str:
+    """Normalize artist text for deterministic sorting/grouping."""
+    value = value.casefold().strip()
+    return re.sub(r"\s+", " ", value)
+
+
+def exportify_artist_group_key(row: ExportifyCsvRow) -> str:
+    """Build a deterministic artist grouping key for batching/sorting."""
+    if row.artists_list:
+        return _artist_sort_key(row.artists_list[0])
+    return _artist_sort_key(row.artists_raw)
+
+
+def backup_and_sort_exportify_csv(path: str) -> str:
+    """Create a deterministic backup then sort the CSV in-place by artist.
+
+    Backup path: ``<stem>.original<suffix>`` in the same directory.
+    If it already exists, it is kept unchanged.
+    """
+    source = Path(path)
+    backup = source.with_name(f"{source.stem}.original{source.suffix}")
+    if not backup.exists():
+        shutil.copy2(source, backup)
+
+    with open(source, encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+
+    if not fieldnames:
+        return str(backup)
+
+    def _row_artist_key(record: dict[str, str]) -> str:
+        artists_raw = (record.get("Artist Name(s)") or "").strip()
+        first_artist = artists_raw.split(";")[0].strip() if artists_raw else ""
+        return _artist_sort_key(first_artist or artists_raw)
+
+    sorted_rows = sorted(
+        enumerate(rows),
+        key=lambda item: (
+            _row_artist_key(item[1]),
+            (item[1].get("Track Name") or "").casefold().strip(),
+            item[0],
+        ),
+    )
+
+    with open(source, "rb") as fh:
+        has_bom = fh.read(3) == b"\xef\xbb\xbf"
+    encoding = "utf-8-sig" if has_bom else "utf-8"
+    with open(source, "w", encoding=encoding, newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows([row for _, row in sorted_rows])
+
+    return str(backup)
 
 
 def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
@@ -101,6 +159,38 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
     return playlist_name, rows
 
 
+def partition_exportify_rows_artist_batched(
+    rows: list[ExportifyCsvRow],
+    max_batch_size: int = 40,
+) -> list[list[ExportifyCsvRow]]:
+    """Partition rows into bounded batches, keeping artist groups intact."""
+    if max_batch_size < 1:
+        raise ValueError("max_batch_size must be >= 1")
+
+    batches: list[list[ExportifyCsvRow]] = []
+    current: list[ExportifyCsvRow] = []
+    i = 0
+    total = len(rows)
+
+    while i < total:
+        group_key = exportify_artist_group_key(rows[i])
+        j = i + 1
+        while j < total and exportify_artist_group_key(rows[j]) == group_key:
+            j += 1
+        group = rows[i:j]
+
+        current.extend(group)
+        if len(current) >= max_batch_size:
+            batches.append(current)
+            current = []
+        i = j
+
+    if current:
+        batches.append(current)
+
+    return batches
+
+
 def detect_file_mode(content: str) -> FileMode:
     """Detect the file mode from the text content of a file.
 
@@ -150,6 +240,36 @@ def _normalise(s: str) -> str:
     return s
 
 
+def strip_title_decorators(title: str) -> str:
+    """Strip common title decorations while preserving core song identity.
+
+    Conservative behavior:
+    - Remove bracketed/parenthesized featured-artist segments.
+    - Remove common trailing variant suffixes (e.g. ``- 2011 Remaster``).
+    """
+    if not title:
+        return ""
+
+    stripped = title
+    # Drop "(feat. ...)" / "[featuring ...]" blocks entirely.
+    stripped = re.sub(
+        r"\s*[\(\[]\s*(?:feat(?:uring)?|ft)\.?\s+[^\)\]]*[\)\]]\s*",
+        " ",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+
+    # Drop trailing "- Remaster/Live/Edit/Version/Mono/Stereo/Deluxe..." suffixes.
+    stripped = re.sub(
+        r"\s*[-\u2013—:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
 def _artist_overlap(query_artists: list[str], result_artist: str) -> bool:
     """Return True if any query artist name substantially overlaps with the
     result's artist string."""
@@ -194,7 +314,7 @@ def _normalise_variant_text(s: str) -> str:
     Returns:
         str: Normalised text with variant markers and standalone year tokens removed.
     """
-    norm = _normalise(s)
+    norm = _normalise(strip_title_decorators(s))
     if not norm:
         return ""
     # Remove known variant markers and standalone year tags.
@@ -400,6 +520,13 @@ def score_candidate_repair(
             score += 5
 
     return score
+
+
+def is_usable_exportify_row(row: ExportifyCsvRow) -> bool:
+    """Whether a CSV row has enough base identity fields to be resolved."""
+    return bool(row.track_name.strip()) and bool(
+        row.artists_raw.strip() or row.artists_list
+    )
 
 
 def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
