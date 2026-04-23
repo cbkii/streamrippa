@@ -443,13 +443,13 @@ class Main:
                 repair_mode=repair_mode,
             )
 
-            playlist = await pending_playlist.resolve()
-            if playlist is None:
-                continue
-
-            # Start downloads as soon as each batch resolves.
             failures_before = self.database.stats.failed
             try:
+                playlist = await pending_playlist.resolve()
+                if playlist is None:
+                    continue
+
+                # Start downloads as soon as each batch resolves.
                 await playlist.rip()
             except Exception as e:
                 logger.error("Error processing CSV batch %d: %s", idx, e)
