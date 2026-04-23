@@ -697,7 +697,7 @@ async def test_pending_csv_playlist_fail_fast_stops_after_batch_error():
             return await original_resolve_row(row, folder, pq, fq, status, cb)
 
         with patch.object(pending, "_resolve_row", side_effect=_patched_resolve_row):
-            with pytest.raises(PendingCsvPlaylist.FailFastAbort):
+            with pytest.raises(PendingCsvPlaylist.FailFastAbortError):
                 await pending.resolve()
 
         # With fail_fast=True and batch_size=1, the first batch raises → stops after 1.
@@ -2179,7 +2179,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
         async def resolve(self):
             event_order.append(f"resolve-{self.seq}")
             if self.seq == 1:
-                raise PendingCsvPlaylist.FailFastAbort("resolve boom")
+                raise PendingCsvPlaylist.FailFastAbortError("resolve boom")
             return MagicMock(rip=AsyncMock())
 
     with (
@@ -2207,6 +2207,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
         )
 
     assert event_order == ["resolve-1"]
+    assert main._csv_top_level_failures == 1
     assert await main.rip() == 1
 
 

@@ -826,8 +826,6 @@ class PendingCsvPlaylist(Pending):
     class FailFastAbortError(RuntimeError):
         """Raised when fail-fast mode aborts CSV row resolution for a batch."""
 
-    FailFastAbort = FailFastAbortError
-
     async def resolve(self) -> Playlist | None:
         parent = self.config.session.downloads.folder
         folder = os.path.join(parent, clean_filepath(self.playlist_name))
