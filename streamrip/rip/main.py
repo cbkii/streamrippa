@@ -428,6 +428,8 @@ class Main:
         )
         fail_fast = self.config.session.reliability.fail_fast
         top_level_failures = 0
+        # Keep a defensive fallback because tests patch PendingCsvPlaylist with fakes
+        # that may not define the resolver-specific fail-fast exception type.
         fail_fast_abort_type = getattr(PendingCsvPlaylist, "FailFastAbortError", None)
 
         for idx, batch in enumerate(batches, start=1):
@@ -455,8 +457,10 @@ class Main:
             except Exception as e:
                 logger.error("Error processing CSV batch %d: %s", idx, e)
                 top_level_failures += 1
-                is_resolver_fail_fast_abort = bool(
-                    fail_fast_abort_type and isinstance(e, fail_fast_abort_type)
+                is_resolver_fail_fast_abort = (
+                    isinstance(e, fail_fast_abort_type)
+                    if fail_fast_abort_type is not None
+                    else False
                 )
                 if fail_fast or is_resolver_fail_fast_abort:
                     console.print("[red]Fail-fast: stopping after batch failure.[/red]")
