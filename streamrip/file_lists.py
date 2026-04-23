@@ -103,7 +103,7 @@ def backup_and_sort_exportify_csv(path: str) -> str:
         has_bom = fh.read(3) == b"\xef\xbb\xbf"
     encoding = "utf-8-sig" if has_bom else "utf-8"
     with open(source, "w", encoding=encoding, newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows([row for _, row in sorted_rows])
 

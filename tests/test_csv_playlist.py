@@ -2026,6 +2026,67 @@ async def test_main_resolve_csv_non_fail_fast_continues_after_rip_exception():
 
 
 @pytest.mark.asyncio
+async def test_main_resolve_csv_rip_exception_contributes_to_main_rip_failures():
+    from unittest.mock import MagicMock, patch
+
+    from streamrip.rip.main import Main
+
+    config = MagicMock()
+    config.session.downloads.requests_per_minute = 0
+    config.session.database.downloads_enabled = False
+    config.session.database.failed_downloads_enabled = False
+    config.session.reliability.fail_fast = False
+
+    rows = [_make_row(title="A"), _make_row(title="B")]
+
+    class _FailingPlaylist:
+        async def rip(self):
+            raise RuntimeError("boom")
+
+    class _FakePendingCsvPlaylist:
+        def __init__(
+            self,
+            playlist_name,
+            rows,
+            primary_client,
+            fallback_client,
+            config,
+            db,
+            repair_mode=False,
+        ):
+            self.rows = rows
+
+        async def resolve(self):
+            return _FailingPlaylist()
+
+    with (
+        patch("streamrip.rip.main.QobuzClient"),
+        patch("streamrip.rip.main.TidalClient"),
+        patch("streamrip.rip.main.DeezerClient"),
+        patch("streamrip.rip.main.SoundcloudClient"),
+    ):
+        main = Main(config)
+
+    main.get_logged_in_client = AsyncMock(return_value=MagicMock(source="qobuz"))
+
+    with (
+        patch(
+            "streamrip.file_lists.partition_exportify_rows_artist_batched",
+            return_value=[rows],
+        ),
+        patch("streamrip.rip.main.PendingCsvPlaylist", _FakePendingCsvPlaylist),
+    ):
+        await main.resolve_csv(
+            playlist_name="Test",
+            rows=rows,
+            source="qobuz",
+            fallback_source="",
+        )
+
+    assert await main.rip() == 1
+
+
+@pytest.mark.asyncio
 async def test_main_resolve_csv_uses_env_batch_size_override():
     from unittest.mock import MagicMock, patch
 

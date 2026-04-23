@@ -77,6 +77,7 @@ class Main:
             failed_log = None
 
         self.database = db.Database(downloads_db, failed_downloads_db, failed_log)
+        self._csv_top_level_failures = 0
 
     def _enable_unresolved_log(self, path: str) -> None:
         """Attach an :class:`~streamrip.db.UnresolvedQueryLog` to the database."""
@@ -213,7 +214,8 @@ class Main:
             already recorded in ``self.database.stats``).
         """
         reliability = self.config.session.reliability
-        top_level_failures = 0
+        top_level_failures = self._csv_top_level_failures
+        self._csv_top_level_failures = 0
 
         if reliability.fail_fast:
             for item in self.media:
@@ -425,6 +427,7 @@ class Main:
             f"(target batch size: {batch_size})."
         )
         fail_fast = self.config.session.reliability.fail_fast
+        top_level_failures = 0
 
         for idx, batch in enumerate(batches, start=1):
             logger.info(
@@ -450,6 +453,7 @@ class Main:
                 await playlist.rip()
             except Exception as e:
                 logger.error("Error processing CSV batch %d: %s", idx, e)
+                top_level_failures += 1
                 if fail_fast:
                     console.print("[red]Fail-fast: stopping after batch failure.[/red]")
                     break
@@ -458,6 +462,8 @@ class Main:
             if fail_fast and self.database.stats.failed > failures_before:
                 console.print("[red]Fail-fast: stopping after batch failure.[/red]")
                 break
+
+        self._csv_top_level_failures += top_level_failures
 
         if self.database.unresolved_log and self.database.unresolved_log.has_entries:
             console.print(

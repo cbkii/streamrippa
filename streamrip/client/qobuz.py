@@ -594,6 +594,10 @@ class QobuzClient(Client):
 
     @staticmethod
     def _redact_sensitive_mapping(payload: dict) -> dict:
+        """Redact sensitive keys in a flat mapping.
+
+        Only top-level keys are redacted; nested dictionaries are not traversed.
+        """
         redacted: dict = {}
         for key, value in payload.items():
             if key.lower() in _SENSITIVE_PARAM_KEYS:
@@ -607,7 +611,7 @@ class QobuzClient(Client):
         user = resp.get("user") or {}
         credential = user.get("credential") or {}
         return {
-            "has_user_id": user.get("id") is not None,
+            "has_user_id": bool(user.get("id")),
             "has_email": bool(user.get("email")),
             "has_user_auth_token": bool(resp.get("user_auth_token")),
             "credential_parameters_present": bool(credential.get("parameters")),

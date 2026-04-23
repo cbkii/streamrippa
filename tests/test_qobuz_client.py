@@ -117,6 +117,21 @@ def test_qobuz_login_response_summary_avoids_token_leak(client):
     }
 
 
+def test_qobuz_login_response_summary_uses_bool_presence_flags(client):
+    summary = client._login_response_summary(
+        {
+            "user_auth_token": "",
+            "user": {"id": 0, "email": "", "credential": {"parameters": {}}},
+        }
+    )
+    assert summary == {
+        "has_user_id": False,
+        "has_email": False,
+        "has_user_auth_token": False,
+        "credential_parameters_present": False,
+    }
+
+
 def test_extract_bundle_urls_normalizes_and_filters_js_paths():
     login_page = """
     <html>

@@ -277,6 +277,27 @@ def test_backup_and_sort_exportify_csv_reuses_existing_backup():
             backup.unlink()
 
 
+def test_backup_and_sort_exportify_csv_ignores_extra_fields_on_write():
+    # Malformed row has one extra comma-delimited field at the end.
+    content = _make_csv(
+        [
+            '"spotify:track:2","Track B","Album","Zulu","2020","","","","","","","","","","2",EXTRA',
+            '"spotify:track:1","Track A","Album","Alpha","2020","","","","","","","","","","1"',
+        ]
+    )
+    path = _write_tmp_csv(content)
+    try:
+        backup_path = backup_and_sort_exportify_csv(path)
+        assert Path(backup_path).exists()
+        _, rows = parse_exportify_csv(path)
+        assert [r.artists_raw for r in rows] == ["Alpha", "Zulu"]
+    finally:
+        os.unlink(path)
+        backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
+        if backup.exists():
+            backup.unlink()
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
