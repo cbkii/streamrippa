@@ -38,7 +38,8 @@ def _make_row(
     isrc: str = "",
     row_index: int = 0,
 ) -> ExportifyCsvRow:
-    artists = artists or ["Artist"]
+    if artists is None:
+        artists = ["Artist"]
     return ExportifyCsvRow(
         track_name=title,
         artists_raw=";".join(artists),
@@ -696,7 +697,8 @@ async def test_pending_csv_playlist_fail_fast_stops_after_batch_error():
             return await original_resolve_row(row, folder, pq, fq, status, cb)
 
         with patch.object(pending, "_resolve_row", side_effect=_patched_resolve_row):
-            await pending.resolve()
+            with pytest.raises(PendingCsvPlaylist.FailFastAbort):
+                await pending.resolve()
 
         # With fail_fast=True and batch_size=1, the first batch raises → stops after 1.
         # Without fail_fast all 5 batches would run.
@@ -2177,7 +2179,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
         async def resolve(self):
             event_order.append(f"resolve-{self.seq}")
             if self.seq == 1:
-                raise RuntimeError("resolve boom")
+                raise PendingCsvPlaylist.FailFastAbort("resolve boom")
             return MagicMock(rip=AsyncMock())
 
     with (
@@ -2205,6 +2207,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
         )
 
     assert event_order == ["resolve-1"]
+    assert await main.rip() == 1
 
 
 @pytest.mark.asyncio

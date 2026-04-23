@@ -823,6 +823,11 @@ class PendingCsvPlaylist(Pending):
                 ")",
             )
 
+    class FailFastAbortError(RuntimeError):
+        """Raised when fail-fast mode aborts CSV row resolution for a batch."""
+
+    FailFastAbort = FailFastAbortError
+
     async def resolve(self) -> Playlist | None:
         parent = self.config.session.downloads.folder
         folder = os.path.join(parent, clean_filepath(self.playlist_name))
@@ -881,10 +886,9 @@ class PendingCsvPlaylist(Pending):
                 for batch in _chunks(self.rows, _RESOLVER_BATCH_SIZE):
                     results = await _resolve_batch(batch)
                     if _handle_batch_results(results):
-                        logger.warning(
-                            "fail_fast: stopping CSV resolver after batch error."
-                        )
-                        break
+                        message = "fail_fast: stopping CSV resolver after batch error."
+                        logger.warning(message)
+                        raise self.FailFastAbortError(message)
         else:
 
             async def _resolve_row_plain(row):
@@ -901,10 +905,9 @@ class PendingCsvPlaylist(Pending):
                 coros = [_resolve_row_plain(row) for row in batch]
                 results = await asyncio.gather(*coros, return_exceptions=True)
                 if _handle_batch_results(results):
-                    logger.warning(
-                        "fail_fast: stopping CSV resolver after batch error."
-                    )
-                    break
+                    message = "fail_fast: stopping CSV resolver after batch error."
+                    logger.warning(message)
+                    raise self.FailFastAbortError(message)
 
         logger.info(
             "CSV resolve complete: %d found, %d failed, %d unresolved out of %d rows",

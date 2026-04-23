@@ -428,6 +428,7 @@ class Main:
         )
         fail_fast = self.config.session.reliability.fail_fast
         top_level_failures = 0
+        fail_fast_abort_error = getattr(PendingCsvPlaylist, "FailFastAbort", None)
 
         for idx, batch in enumerate(batches, start=1):
             logger.info(
@@ -454,7 +455,10 @@ class Main:
             except Exception as e:
                 logger.error("Error processing CSV batch %d: %s", idx, e)
                 top_level_failures += 1
-                if fail_fast:
+                is_resolver_fail_fast_abort = bool(
+                    fail_fast_abort_error and isinstance(e, fail_fast_abort_error)
+                )
+                if fail_fast or is_resolver_fail_fast_abort:
                     console.print("[red]Fail-fast: stopping after batch failure.[/red]")
                     break
                 continue
