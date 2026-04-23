@@ -80,6 +80,34 @@ def test_get_downloadable_signing_failure_status_400(monkeypatch, client):
         arun(client.get_downloadable("19512574", 3))
 
 
+def test_qobuz_redacts_sensitive_params_in_debug_helper(client):
+    payload = {
+        "app_id": "123",
+        "user_auth_token": "secret-token",
+        "password": "hashed-password",
+        "request_sig": "abcdef",
+    }
+    redacted = client._redact_sensitive_mapping(payload)
+    assert redacted["app_id"] == "123"
+    assert redacted["user_auth_token"] == "***REDACTED***"
+    assert redacted["password"] == "***REDACTED***"
+    assert redacted["request_sig"] == "***REDACTED***"
+
+
+def test_qobuz_login_response_summary_avoids_token_leak(client):
+    summary = client._login_response_summary(
+        {
+            "user_auth_token": "very-secret",
+            "user": {"id": 99, "credential": {"parameters": {"foo": "bar"}}},
+        }
+    )
+    assert summary == {
+        "user_id": 99,
+        "has_user_auth_token": True,
+        "credential_parameters_present": True,
+    }
+
+
 def test_extract_bundle_urls_normalizes_and_filters_js_paths():
     login_page = """
     <html>

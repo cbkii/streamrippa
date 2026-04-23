@@ -29,6 +29,8 @@ from .parse_url import parse_url
 from .prompter import get_prompter
 
 logger = logging.getLogger("streamrip")
+_EXPORTIFY_BATCH_SIZE_ENV = "STREAMRIP_EXPORTIFY_BATCH_SIZE"
+_DEFAULT_EXPORTIFY_BATCH_SIZE = 40
 
 if platform.system() == "Windows":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -79,6 +81,28 @@ class Main:
     def _enable_unresolved_log(self, path: str) -> None:
         """Attach an :class:`~streamrip.db.UnresolvedQueryLog` to the database."""
         self.database.unresolved_log = db.UnresolvedQueryLog(path)
+
+    @staticmethod
+    def _get_exportify_batch_size() -> int:
+        """Return configured Exportify CSV batch size from env (safe fallback)."""
+        value = (os.getenv(_EXPORTIFY_BATCH_SIZE_ENV) or "").strip()
+        if value == "":
+            return _DEFAULT_EXPORTIFY_BATCH_SIZE
+
+        try:
+            parsed = int(value)
+            if parsed >= 1:
+                return parsed
+        except ValueError:
+            pass
+
+        logger.warning(
+            "Invalid %s=%r; using default batch size %d",
+            _EXPORTIFY_BATCH_SIZE_ENV,
+            value,
+            _DEFAULT_EXPORTIFY_BATCH_SIZE,
+        )
+        return _DEFAULT_EXPORTIFY_BATCH_SIZE
 
     async def add(self, url: str):
         """Add url as a pending item.
@@ -374,6 +398,8 @@ class Main:
                 ``repair_mode=True``) to recover rows left unresolved on the main
                 import path.
         """
+        from ..file_lists import partition_exportify_rows_artist_batched
+
         if unresolved_log_path:
             self._enable_unresolved_log(unresolved_log_path)
 
@@ -382,14 +408,9 @@ class Main:
         if fallback_source:
             fallback_client = await self.get_logged_in_client(fallback_source)
 
-        pending_playlist = PendingCsvPlaylist(
-            playlist_name=playlist_name,
-            rows=rows,
-            primary_client=primary_client,
-            fallback_client=fallback_client,
-            config=self.config,
-            db=self.database,
-            repair_mode=repair_mode,
+        batch_size = self._get_exportify_batch_size()
+        batches = partition_exportify_rows_artist_batched(
+            rows, max_batch_size=batch_size
         )
 
         mode_label = "[bold yellow](repair mode)[/bold yellow] " if repair_mode else ""
@@ -398,10 +419,32 @@ class Main:
             f"[cyan]{playlist_name}[/cyan] using [green]{source}[/green]"
             + (f" / [blue]{fallback_source}[/blue]" if fallback_source else "")
         )
+        console.print(
+            "Processing CSV in "
+            f"[yellow]{len(batches)}[/yellow] artist-aware batch(es) "
+            f"(target batch size: {batch_size})."
+        )
 
-        playlist = await pending_playlist.resolve()
-        if playlist is not None:
-            self.media.append(playlist)
+        for idx, batch in enumerate(batches, start=1):
+            logger.info(
+                "Resolving CSV batch %d/%d (%d rows)", idx, len(batches), len(batch)
+            )
+            pending_playlist = PendingCsvPlaylist(
+                playlist_name=playlist_name,
+                rows=batch,
+                primary_client=primary_client,
+                fallback_client=fallback_client,
+                config=self.config,
+                db=self.database,
+                repair_mode=repair_mode,
+            )
+
+            playlist = await pending_playlist.resolve()
+            if playlist is None:
+                continue
+
+            # Start downloads as soon as each batch resolves.
+            await playlist.rip()
 
         if self.database.unresolved_log and self.database.unresolved_log.has_entries:
             console.print(

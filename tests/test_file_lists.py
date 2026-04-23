@@ -5,15 +5,21 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from pathlib import Path
 
 from streamrip.file_lists import (
     ExportifyCsvRow,
     _artist_overlap,
     _normalise,
     _normalise_variant_text,
+    backup_and_sort_exportify_csv,
     detect_file_mode,
+    exportify_artist_group_key,
+    is_usable_exportify_row,
     parse_exportify_csv,
+    partition_exportify_rows_artist_batched,
     score_candidate,
+    strip_title_decorators,
 )
 
 # ---------------------------------------------------------------------------
@@ -227,6 +233,50 @@ def test_parse_isrc_track_isrc_fallback():
         os.unlink(path)
 
 
+def test_backup_and_sort_exportify_csv_creates_backup_and_sorts_rows():
+    content = _make_csv(
+        [
+            '"spotify:track:2","Track B","Album","Zulu","2020","","","","","","","","","","2"',
+            '"spotify:track:1","Track A","Album","Alpha","2020","","","","","","","","","","1"',
+        ]
+    )
+    path = _write_tmp_csv(content)
+    try:
+        backup_path = backup_and_sort_exportify_csv(path)
+        assert Path(backup_path).exists()
+
+        with open(backup_path, encoding="utf-8-sig") as fh:
+            backup_text = fh.read()
+        assert "Track B" in backup_text and "Track A" in backup_text
+
+        _, rows = parse_exportify_csv(path)
+        assert [r.artists_raw for r in rows] == ["Alpha", "Zulu"]
+    finally:
+        os.unlink(path)
+        backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
+        if backup.exists():
+            backup.unlink()
+
+
+def test_backup_and_sort_exportify_csv_reuses_existing_backup():
+    content = _make_csv(
+        [
+            '"spotify:track:1","Track A","Album","Bravo","2020","","","","","","","","","","1"'
+        ]
+    )
+    path = _write_tmp_csv(content)
+    backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
+    backup.write_text("sentinel", encoding="utf-8")
+    try:
+        backup_path = backup_and_sort_exportify_csv(path)
+        assert backup_path == str(backup)
+        assert backup.read_text(encoding="utf-8") == "sentinel"
+    finally:
+        os.unlink(path)
+        if backup.exists():
+            backup.unlink()
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -327,6 +377,29 @@ def test_normalise_variant_text_removes_all_variant_markers():
     )
 
 
+def test_strip_title_decorators_removes_feat_and_remaster_suffixes():
+    assert strip_title_decorators("1, 2 Step (feat. Missy Elliott)") == "1, 2 Step"
+    assert strip_title_decorators("Song Name - 2011 Remaster") == "Song Name"
+
+
+def test_score_featured_title_matches_plain_canonical_title():
+    row = _make_row(
+        title="1, 2 Step (feat. Missy Elliott)",
+        artists=["Ciara", "Missy Elliott"],
+        album="Goodies",
+        date="2004",
+    )
+    score = score_candidate(
+        row,
+        "1, 2 Step",
+        "Ciara",
+        "Goodies",
+        "2004",
+        "",
+    )
+    assert score >= 50
+
+
 def test_score_variant_title_does_not_match_empty_normalized_titles():
     row = _make_row(title="1999")
     score = score_candidate(
@@ -338,6 +411,53 @@ def test_score_variant_title_does_not_match_empty_normalized_titles():
         "",
     )
     assert score == 0
+
+
+def test_is_usable_exportify_row_requires_track_and_artist():
+    assert is_usable_exportify_row(_make_row())
+    assert not is_usable_exportify_row(_make_row(title=""))
+    blank_artist_row = ExportifyCsvRow(
+        track_name="Song",
+        artists_raw="",
+        artists_list=[],
+        album="Album",
+        release_date="2020",
+        isrc="",
+        spotify_uri="",
+        genres="",
+        loudness="",
+        tempo="",
+        position=1,
+        row_index=0,
+    )
+    assert not is_usable_exportify_row(blank_artist_row)
+
+
+def test_partition_exportify_rows_artist_batched_allows_artist_group_overflow():
+    rows = [
+        _make_row(title=f"S{i}", artists=["Artist A"], album="", date="", isrc="")
+        for i in range(37)
+    ] + [
+        _make_row(title=f"T{i}", artists=["Artist B"], album="", date="", isrc="")
+        for i in range(12)
+    ]
+    batches = partition_exportify_rows_artist_batched(rows, max_batch_size=40)
+    assert [len(b) for b in batches] == [49]
+
+
+def test_partition_exportify_rows_artist_batched_large_single_artist_group():
+    rows = [
+        _make_row(title=f"S{i}", artists=["Artist A"], album="", date="", isrc="")
+        for i in range(78)
+    ]
+    batches = partition_exportify_rows_artist_batched(rows, max_batch_size=40)
+    assert len(batches) == 1
+    assert len(batches[0]) == 78
+
+
+def test_exportify_artist_group_key_is_deterministic():
+    row = _make_row(artists=["Ciara"])
+    assert exportify_artist_group_key(row) == "ciara"
 
 
 def test_score_multi_artist_prefers_full_coverage():
