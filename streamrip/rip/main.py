@@ -458,9 +458,8 @@ class Main:
                 logger.error("Error processing CSV batch %d: %s", idx, e)
                 top_level_failures += 1
                 is_resolver_fail_fast_abort = (
-                    isinstance(e, fail_fast_abort_type)
-                    if fail_fast_abort_type is not None
-                    else False
+                    fail_fast_abort_type is not None
+                    and isinstance(e, fail_fast_abort_type)
                 )
                 if fail_fast or is_resolver_fail_fast_abort:
                     console.print("[red]Fail-fast: stopping after batch failure.[/red]")

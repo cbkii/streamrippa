@@ -2159,6 +2159,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
 
     rows = [_make_row(title="A"), _make_row(title="B"), _make_row(title="C")]
     event_order: list[str] = []
+    raised_types: list[type[Exception]] = []
 
     class _FakePendingCsvPlaylist:
         created = 0
@@ -2179,6 +2180,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
         async def resolve(self):
             event_order.append(f"resolve-{self.seq}")
             if self.seq == 1:
+                raised_types.append(PendingCsvPlaylist.FailFastAbortError)
                 raise PendingCsvPlaylist.FailFastAbortError("resolve boom")
             return MagicMock(rip=AsyncMock())
 
@@ -2207,6 +2209,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
         )
 
     assert event_order == ["resolve-1"]
+    assert raised_types == [PendingCsvPlaylist.FailFastAbortError]
     assert main._csv_top_level_failures == 1
     assert await main.rip() == 1
 
