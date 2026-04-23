@@ -30,8 +30,11 @@ _PAGINATION_BATCH_SIZE = 10
 _REDACTED = "***REDACTED***"
 _SENSITIVE_PARAM_KEYS: frozenset[str] = frozenset(
     {
+        "email",
         "password",
         "password_or_token",
+        "user_id",
+        "userid",
         "user_auth_token",
         "request_sig",
         "secret",
@@ -604,7 +607,8 @@ class QobuzClient(Client):
         user = resp.get("user") or {}
         credential = user.get("credential") or {}
         return {
-            "user_id": user.get("id"),
+            "has_user_id": user.get("id") is not None,
+            "has_email": bool(user.get("email")),
             "has_user_auth_token": bool(resp.get("user_auth_token")),
             "credential_parameters_present": bool(credential.get("parameters")),
         }

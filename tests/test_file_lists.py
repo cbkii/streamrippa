@@ -380,6 +380,7 @@ def test_normalise_variant_text_removes_all_variant_markers():
 def test_strip_title_decorators_removes_feat_and_remaster_suffixes():
     assert strip_title_decorators("1, 2 Step (feat. Missy Elliott)") == "1, 2 Step"
     assert strip_title_decorators("Song Name - 2011 Remaster") == "Song Name"
+    assert strip_title_decorators("Song Name \u2013 2011 Remaster") == "Song Name"
 
 
 def test_score_featured_title_matches_plain_canonical_title():

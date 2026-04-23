@@ -424,6 +424,7 @@ class Main:
             f"[yellow]{len(batches)}[/yellow] artist-aware batch(es) "
             f"(target batch size: {batch_size})."
         )
+        fail_fast = self.config.session.reliability.fail_fast
 
         for idx, batch in enumerate(batches, start=1):
             logger.info(
@@ -444,7 +445,19 @@ class Main:
                 continue
 
             # Start downloads as soon as each batch resolves.
-            await playlist.rip()
+            failures_before = self.database.stats.failed
+            try:
+                await playlist.rip()
+            except Exception as e:
+                logger.error("Error processing CSV batch %d: %s", idx, e)
+                if fail_fast:
+                    console.print("[red]Fail-fast: stopping after batch failure.[/red]")
+                    break
+                continue
+
+            if fail_fast and self.database.stats.failed > failures_before:
+                console.print("[red]Fail-fast: stopping after batch failure.[/red]")
+                break
 
         if self.database.unresolved_log and self.database.unresolved_log.has_entries:
             console.print(

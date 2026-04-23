@@ -99,9 +99,9 @@ def backup_and_sort_exportify_csv(path: str) -> str:
         ),
     )
 
-    encoding = (
-        "utf-8-sig" if source.read_bytes().startswith(b"\xef\xbb\xbf") else "utf-8"
-    )
+    with open(source, "rb") as fh:
+        has_bom = fh.read(3) == b"\xef\xbb\xbf"
+    encoding = "utf-8-sig" if has_bom else "utf-8"
     with open(source, "w", encoding=encoding, newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
@@ -261,7 +261,7 @@ def strip_title_decorators(title: str) -> str:
 
     # Drop trailing "- Remaster/Live/Edit/Version/Mono/Stereo/Deluxe..." suffixes.
     stripped = re.sub(
-        r"\s*[-—:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
+        r"\s*[-\u2013—:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
         "",
         stripped,
         flags=re.IGNORECASE,

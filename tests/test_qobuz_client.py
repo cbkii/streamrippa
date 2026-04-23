@@ -83,12 +83,16 @@ def test_get_downloadable_signing_failure_status_400(monkeypatch, client):
 def test_qobuz_redacts_sensitive_params_in_debug_helper(client):
     payload = {
         "app_id": "123",
+        "email": "user@example.com",
+        "user_id": "12345",
         "user_auth_token": "secret-token",
         "password": "hashed-password",
         "request_sig": "abcdef",
     }
     redacted = client._redact_sensitive_mapping(payload)
     assert redacted["app_id"] == "123"
+    assert redacted["email"] == "***REDACTED***"
+    assert redacted["user_id"] == "***REDACTED***"
     assert redacted["user_auth_token"] == "***REDACTED***"
     assert redacted["password"] == "***REDACTED***"
     assert redacted["request_sig"] == "***REDACTED***"
@@ -98,11 +102,16 @@ def test_qobuz_login_response_summary_avoids_token_leak(client):
     summary = client._login_response_summary(
         {
             "user_auth_token": "very-secret",
-            "user": {"id": 99, "credential": {"parameters": {"foo": "bar"}}},
+            "user": {
+                "id": 99,
+                "email": "user@example.com",
+                "credential": {"parameters": {"foo": "bar"}},
+            },
         }
     )
     assert summary == {
-        "user_id": 99,
+        "has_user_id": True,
+        "has_email": True,
         "has_user_auth_token": True,
         "credential_parameters_present": True,
     }
