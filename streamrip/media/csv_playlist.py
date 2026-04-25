@@ -37,6 +37,7 @@ import random
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from time import monotonic
 
@@ -53,6 +54,7 @@ from ..file_lists import (
     MatchPolicy,
     _artist_overlap,
     _duration_match_with_tolerance,
+    _normalise,
     explain_candidate_score,
     is_usable_exportify_row,
     score_candidate,
@@ -708,7 +710,15 @@ def _top_rejected_candidates(
                 signals=explain.signals,
             )
         )
-    rejected.sort(key=lambda c: (c.score, c.id), reverse=True)
+    # All rejected candidates have score == 0.  Sort by title-similarity to the
+    # row as a proxy for "closeness", so the most relevant rejections surface
+    # first in telemetry and unresolved logs.
+    row_norm = _normalise(row.track_name)
+
+    def _proximity(c: TrackCandidate) -> float:
+        return SequenceMatcher(None, row_norm, _normalise(c.title)).ratio()
+
+    rejected.sort(key=_proximity, reverse=True)
     return rejected[:limit]
 
 
@@ -1872,20 +1882,19 @@ class PendingCsvPlaylist(Pending):
                         client=client,
                     )
                     reason = _candidate_reason(hinted_candidate, provider_min_score)
-                    # Build population from deduplicated best-per-ID scores so
-                    # margin_to_second is not deflated by repeat query hits.
-                    _cid = hinted_candidate.id
-                    best_score_by_id[_cid] = max(
-                        best_score_by_id.get(_cid, 0), hinted_candidate.score
-                    )
-                    _population = list(best_score_by_id.values())
+                    # The hinted lookup has no peer population yet; using the
+                    # candidate's own score as the population would yield
+                    # margin == score and inflate confidence to CONF_HIGH for
+                    # any passing match.  Use margin=0 (conservative baseline)
+                    # and record the score in best_score_by_id so that
+                    # subsequent search-query candidates are compared against it.
+                    hinted_candidate.margin_to_second = 0
                     hinted_candidate.confidence = _confidence_for_candidate(
-                        hinted_candidate,
-                        provider_min_score,
-                        _margin_to_second_best(hinted_candidate.score, _population),
+                        hinted_candidate, provider_min_score, 0
                     )
-                    hinted_candidate.margin_to_second = _margin_to_second_best(
-                        hinted_candidate.score, _population
+                    best_score_by_id[hinted_candidate.id] = max(
+                        best_score_by_id.get(hinted_candidate.id, 0),
+                        hinted_candidate.score,
                     )
                     if reason == "matched":
                         return ResolverOutcome(

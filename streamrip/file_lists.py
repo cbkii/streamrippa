@@ -90,6 +90,10 @@ class MatchPolicy:
     def from_config(cls, config) -> "MatchPolicy":
         if config is None:
             return cls()
+        # Read the env override once here so it is part of the lru_cache key
+        # inside _resolve_bad_context_fields and stale results are never served
+        # when the env variable changes (e.g. in tests or per-process reload).
+        env_bad_ctx = (os.getenv("STREAMRIP_BAD_CONTEXT_FIELDS") or "").strip()
         return cls(
             enabled=bool(getattr(config, "variant_policy_enabled", True)),
             live_mode=str(getattr(config, "live_mode", "reject")),
@@ -104,7 +108,8 @@ class MatchPolicy:
                 getattr(config, "reject_bad_context_releases", True)
             ),
             bad_context_fields=_resolve_bad_context_fields(
-                tuple(getattr(config, "bad_context_fields", ("title", "album")) or ())
+                tuple(getattr(config, "bad_context_fields", ("title", "album")) or ()),
+                env_bad_ctx,
             ),
             enable_guarded_fuzzy_normal=bool(
                 getattr(config, "enable_guarded_fuzzy_normal", False)
@@ -508,8 +513,14 @@ def _contains_bad_context(title: str, album: str, artist: str) -> bool:
 @functools.lru_cache(maxsize=64)
 def _resolve_bad_context_fields(
     config_fields: tuple[str, ...] | None,
+    env_override: str = "",
 ) -> tuple[str, ...]:
-    env_override = (os.getenv("STREAMRIP_BAD_CONTEXT_FIELDS") or "").strip()
+    """Resolve the effective set of bad-context fields to scan.
+
+    ``env_override`` must be passed explicitly (read by the caller from
+    ``STREAMRIP_BAD_CONTEXT_FIELDS``) so that it is part of the ``lru_cache``
+    key and stale results are never returned when the env changes.
+    """
     raw_fields: list[str]
     if env_override:
         raw_fields = [
