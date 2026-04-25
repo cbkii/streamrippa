@@ -693,3 +693,94 @@ def test_no_false_positive_for_wrong_title_with_same_artist():
     row = _make_row(title="Blue in Green", artists=["Miles Davis"])
     score = score_candidate(row, "So What", "Miles Davis", "Kind of Blue", "1959", "")
     assert score == 0
+
+
+def test_bare_edit_token_not_flagged_as_radio_edit():
+    """Titles like 'Final Edit' must not be incorrectly tagged as radio_edit variants."""
+    row = _make_row(title="Final Edit", artists=["Artist A"])
+    score = score_candidate(
+        row,
+        "Final Edit",
+        "Artist A",
+        "",
+        "",
+        "",
+        policy=MatchPolicy(radio_edit_mode="reject"),
+    )
+    # Should match — the candidate is the same title, not an unexpected radio edit
+    assert score > 0
+
+
+def test_bare_mix_token_not_flagged_as_remix():
+    """Titles like 'Mix Tape' must not be incorrectly tagged as remix variants."""
+    row = _make_row(title="Mix Tape", artists=["Artist A"])
+    score = score_candidate(
+        row,
+        "Mix Tape",
+        "Artist A",
+        "",
+        "",
+        "",
+    )
+    # Should match — 'mix' by itself is not a remix marker
+    assert score > 0
+
+
+def test_isrc_bad_context_respects_policy_enabled():
+    """ISRC match on a bad-context candidate should still return 100 when policy is disabled."""
+    row = _make_row(isrc="USTEST123456", title="Song", artists=["Artist"])
+    disabled_policy = MatchPolicy(enabled=False)
+    score = score_candidate(
+        row,
+        "Song",
+        "Artist",
+        "Karaoke Tribute Collection",
+        "",
+        "USTEST123456",
+        policy=disabled_policy,
+    )
+    assert score == 100
+
+
+def test_isrc_bad_context_respects_reject_flag_off():
+    """ISRC match on a bad-context candidate should return 100 when reject_bad_context_releases=False."""
+    row = _make_row(isrc="USTEST123456", title="Song", artists=["Artist"])
+    no_reject_policy = MatchPolicy(reject_bad_context_releases=False)
+    score = score_candidate(
+        row,
+        "Song",
+        "Artist",
+        "Karaoke Tribute Collection",
+        "",
+        "USTEST123456",
+        policy=no_reject_policy,
+    )
+    assert score == 100
+
+
+def test_isrc_bad_context_rejected_by_default_policy():
+    """ISRC match on a bad-context candidate is rejected by the default enabled policy."""
+    row = _make_row(isrc="USTEST123456", title="Song", artists=["Artist"])
+    score = score_candidate(
+        row,
+        "Song",
+        "Artist",
+        "Karaoke Tribute Collection",
+        "",
+        "USTEST123456",
+    )
+    assert score == 0
+
+
+def test_isrc_bad_context_allowed_for_karaoke_row():
+    """An ISRC-matched karaoke candidate is accepted when the CSV row itself requests karaoke."""
+    row = _make_row(isrc="USTEST123456", title="Song (Karaoke)", artists=["Artist"])
+    score = score_candidate(
+        row,
+        "Song (Karaoke)",
+        "Artist",
+        "Karaoke Collection",
+        "",
+        "USTEST123456",
+    )
+    assert score == 100

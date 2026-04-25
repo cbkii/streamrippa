@@ -320,9 +320,9 @@ _VARIANT_ALIASES: dict[str, tuple[str, ...]] = {
     "live": ("live", "live at", "in concert"),
     "acoustic": ("acoustic", "unplugged"),
     "instrumental": ("instrumental",),
-    "radio_edit": ("radio edit", "radio mix", "single edit", "short version", "edit"),
+    "radio_edit": ("radio edit", "radio mix", "single edit", "short version"),
     "remaster": ("remaster", "remastered", "anniversary remaster"),
-    "remix": ("remix", "mix"),
+    "remix": ("remix",),
     "demo": ("demo",),
     "explicit": ("explicit",),
     "clean": ("clean",),
@@ -560,11 +560,20 @@ def score_candidate(
 
     if row.isrc and candidate_isrc:
         if row.isrc.upper() == candidate_isrc.upper():
-            # ISRC still requires sane identity context to avoid absurd mismatches.
-            if _contains_bad_context(
-                candidate_title, candidate_album, candidate_artist
+            # ISRC still requires sane identity context to avoid absurd mismatches,
+            # but only when the policy is enabled and configured to do so.
+            if (
+                policy.enabled
+                and policy.reject_bad_context_releases
+                and _contains_bad_context(
+                    candidate_title, candidate_album, candidate_artist
+                )
             ):
-                return 0
+                row_title_parsed = _parse_title(row.track_name)
+                if not row_title_parsed.variants.intersection(
+                    {"karaoke", "tribute", "commentary"}
+                ):
+                    return 0
             return 100
 
     row_title = _parse_title(row.track_name)
