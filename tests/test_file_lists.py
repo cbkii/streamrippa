@@ -9,6 +9,7 @@ from pathlib import Path
 
 from streamrip.file_lists import (
     ExportifyCsvRow,
+    MatchPolicy,
     _artist_overlap,
     _normalise,
     _normalise_variant_text,
@@ -297,6 +298,7 @@ def _make_row(
     album: str = "Kind of Blue",
     date: str = "1959",
     isrc: str = "",
+    duration_ms: int | None = None,
 ) -> ExportifyCsvRow:
     artists = artists or ["Miles Davis"]
     return ExportifyCsvRow(
@@ -312,6 +314,7 @@ def _make_row(
         tempo="",
         position=1,
         row_index=0,
+        duration_ms=duration_ms,
     )
 
 
@@ -587,4 +590,230 @@ def test_repair_score_empty_title_returns_zero():
 
     row = _make_row()
     score = score_candidate_repair(row, "", "Miles Davis", "", "", "")
+    assert score == 0
+
+
+def test_source_declared_instrumental_is_honored():
+    row = _make_row(title="My Song (Instrumental)", artists=["Artist A"], album="Album")
+    instrumental = score_candidate(
+        row, "My Song - Instrumental", "Artist A", "Album", "2020", ""
+    )
+    studio = score_candidate(row, "My Song", "Artist A", "Album", "2020", "")
+    assert instrumental > studio
+
+
+def test_unexpected_instrumental_is_rejected_by_default():
+    row = _make_row(title="My Song", artists=["Artist A"], album="Album")
+    score = score_candidate(row, "My Song (Instrumental)", "Artist A", "Album", "", "")
+    assert score == 0
+
+
+def test_unexpected_instrumental_can_be_allowed_by_policy():
+    row = _make_row(title="My Song", artists=["Artist A"], album="Album")
+    policy = MatchPolicy(instrumental_mode="penalty")
+    score = score_candidate(
+        row,
+        "My Song (Instrumental)",
+        "Artist A",
+        "Album",
+        "",
+        "",
+        policy=policy,
+    )
+    assert score > 0
+
+
+def test_remaster_equivalent_default_accepts_with_year_deemphasis():
+    row = _make_row(title="My Song", artists=["Artist A"], date="1991")
+    remaster = score_candidate(
+        row, "My Song (2019 Remaster)", "Artist A", "Any Album", "2019", ""
+    )
+    plain = score_candidate(row, "My Song", "Artist A", "Any Album", "1991", "")
+    assert remaster > 0
+    assert abs(remaster - plain) <= 20
+
+
+def test_radio_edit_policy_controls_acceptance():
+    row = _make_row(title="My Song", artists=["Artist A"])
+    reject_policy = MatchPolicy(radio_edit_mode="reject")
+    penalty_policy = MatchPolicy(radio_edit_mode="penalty")
+    assert (
+        score_candidate(
+            row,
+            "My Song - Radio Edit",
+            "Artist A",
+            "",
+            "",
+            "",
+            policy=reject_policy,
+        )
+        == 0
+    )
+    assert (
+        score_candidate(
+            row,
+            "My Song - Radio Edit",
+            "Artist A",
+            "",
+            "",
+            "",
+            policy=penalty_policy,
+        )
+        > 0
+    )
+
+
+def test_album_deemphasis_prefers_identity_and_duration():
+    row = _make_row(title="Blue in Green", artists=["Miles Davis"], duration_ms=340000)
+    better_identity = score_candidate(
+        row, "Blue in Green", "Miles Davis", "Compilation X", "1959", "", 340500
+    )
+    weaker_identity = score_candidate(
+        row, "Blue in Green", "Unknown", "Kind of Blue", "1959", "", 340500
+    )
+    assert better_identity > weaker_identity
+
+
+def test_duration_reranking_penalizes_wrong_length():
+    row = _make_row(title="Track", artists=["Artist A"], duration_ms=210000)
+    close = score_candidate(row, "Track", "Artist A", "", "", "", 211000)
+    far = score_candidate(row, "Track", "Artist A", "", "", "", 258000)
+    assert close > far
+
+
+def test_bad_context_release_rejected():
+    row = _make_row(title="Track", artists=["Artist A"])
+    score = score_candidate(
+        row, "Track", "Artist A", "Karaoke Tribute Collection", "", ""
+    )
+    assert score == 0
+
+
+def test_no_false_positive_for_wrong_title_with_same_artist():
+    row = _make_row(title="Blue in Green", artists=["Miles Davis"])
+    score = score_candidate(row, "So What", "Miles Davis", "Kind of Blue", "1959", "")
+    assert score == 0
+
+
+def test_bare_edit_token_not_flagged_as_radio_edit():
+    """Titles like 'Final Edit' must not be incorrectly tagged as radio_edit variants."""
+    row = _make_row(title="Final Edit", artists=["Artist A"])
+    score = score_candidate(
+        row,
+        "Final Edit",
+        "Artist A",
+        "",
+        "",
+        "",
+        policy=MatchPolicy(radio_edit_mode="reject"),
+    )
+    # Should match — the candidate is the same title, not an unexpected radio edit
+    assert score > 0
+
+
+def test_bare_mix_token_not_flagged_as_remix():
+    """Titles like 'Mix Tape' must not be incorrectly tagged as remix variants."""
+    row = _make_row(title="Mix Tape", artists=["Artist A"])
+    score = score_candidate(
+        row,
+        "Mix Tape",
+        "Artist A",
+        "",
+        "",
+        "",
+    )
+    # Should match — 'mix' by itself is not a remix marker
+    assert score > 0
+
+
+def test_isrc_bad_context_respects_policy_enabled():
+    """ISRC match on a bad-context candidate should still return 100 when policy is disabled."""
+    row = _make_row(isrc="USTEST123456", title="Song", artists=["Artist"])
+    disabled_policy = MatchPolicy(enabled=False)
+    score = score_candidate(
+        row,
+        "Song",
+        "Artist",
+        "Karaoke Tribute Collection",
+        "",
+        "USTEST123456",
+        policy=disabled_policy,
+    )
+    assert score == 100
+
+
+def test_isrc_bad_context_respects_reject_flag_off():
+    """ISRC match on a bad-context candidate should return 100 when reject_bad_context_releases=False."""
+    row = _make_row(isrc="USTEST123456", title="Song", artists=["Artist"])
+    no_reject_policy = MatchPolicy(reject_bad_context_releases=False)
+    score = score_candidate(
+        row,
+        "Song",
+        "Artist",
+        "Karaoke Tribute Collection",
+        "",
+        "USTEST123456",
+        policy=no_reject_policy,
+    )
+    assert score == 100
+
+
+def test_isrc_bad_context_rejected_by_default_policy():
+    """ISRC match on a bad-context candidate is rejected by the default enabled policy."""
+    row = _make_row(isrc="USTEST123456", title="Song", artists=["Artist"])
+    score = score_candidate(
+        row,
+        "Song",
+        "Artist",
+        "Karaoke Tribute Collection",
+        "",
+        "USTEST123456",
+    )
+    assert score == 0
+
+
+def test_isrc_bad_context_allowed_for_karaoke_row():
+    """An ISRC-matched karaoke candidate is accepted when the CSV row itself requests karaoke."""
+    row = _make_row(isrc="USTEST123456", title="Song (Karaoke)", artists=["Artist"])
+    score = score_candidate(
+        row,
+        "Song (Karaoke)",
+        "Artist",
+        "Karaoke Collection",
+        "",
+        "USTEST123456",
+    )
+    assert score == 100
+
+
+def test_radio_edit_alias_still_detected():
+    """Removing the bare 'edit' alias must not break detection of genuine radio edits."""
+    row = _make_row(title="My Song", artists=["Artist A"])
+    reject_policy = MatchPolicy(radio_edit_mode="reject")
+    # Candidate is "My Song - Radio Edit" → should still be detected and rejected
+    score = score_candidate(
+        row,
+        "My Song - Radio Edit",
+        "Artist A",
+        "",
+        "",
+        "",
+        policy=reject_policy,
+    )
+    assert score == 0
+
+
+def test_remix_alias_still_detected():
+    """Removing the bare 'mix' alias must not break detection of genuine remixes."""
+    row = _make_row(title="My Song", artists=["Artist A"])
+    # Candidate is "My Song Club Remix" → 'remix' alias should still flag it
+    # and since 'remix' defaults to 'reject', it should be rejected when unexpected
+    score = score_candidate(
+        row,
+        "My Song Club Remix",
+        "Artist A",
+        "",
+        "",
+        "",
+    )
     assert score == 0
