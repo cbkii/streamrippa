@@ -276,7 +276,7 @@ For each CSV row, streamrip:
 
 `[lastfm].source` and `[lastfm].fallback_source` are used as global defaults for all Last.fm playlist resolution flows, not only CSV workflows. For CSV imports and repair, `[csv_resolver].default_source` / `[csv_resolver].default_fallback_source` take precedence over the `[lastfm]` values. The full precedence is:
 
-```
+```text
 CLI --source/--fallback-source
   > [csv_resolver].default_source / default_fallback_source
   > [lastfm].source / fallback_source

@@ -1476,7 +1476,14 @@ class PendingCsvPlaylist(Pending):
         min_score = (
             _MIN_ACCEPTABLE_SCORE_REPAIR if self.repair_mode else _MIN_ACCEPTABLE_SCORE
         )
-        low_score_floor = max(0, int(self.lowscore_floor or _DEFAULT_LOW_SCORE_FLOOR))
+        low_score_floor = max(
+            0,
+            int(
+                self.lowscore_floor
+                if self.lowscore_floor is not None
+                else _DEFAULT_LOW_SCORE_FLOOR
+            ),
+        )
         ratio, seconds = self._get_duration_tolerance()
 
         primary_outcome = ResolverOutcome(None, "no results", "", "")
@@ -1773,10 +1780,24 @@ class PendingCsvPlaylist(Pending):
             # Duration sanity: only enforced when expected exists.
             if row.duration_ms:
                 try:
-                    resp = await candidate.client.get_metadata(candidate.id, "track")
+                    if (
+                        self.provider_budgets is not None
+                        and candidate.source in self.provider_budgets
+                    ):
+                        async with self.provider_budgets[candidate.source].metadata_sem:
+                            await self._provider_wait(candidate.source)
+                            resp = await candidate.client.get_metadata(
+                                candidate.id, "track"
+                            )
+                    else:
+                        resp = await candidate.client.get_metadata(
+                            candidate.id, "track"
+                        )
+                    self._provider_after_call(candidate.source, ok=True, err=None)
                     duration_ms = _item_duration_ms(candidate.source, resp)
                     actual_seconds = (duration_ms / 1000.0) if duration_ms else None
                 except Exception as e:
+                    self._provider_after_call(candidate.source, ok=False, err=e)
                     logger.debug(
                         "Low-score duration guard read failed for %s:%s: %s",
                         candidate.source,

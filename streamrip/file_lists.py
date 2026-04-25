@@ -614,12 +614,16 @@ def _duration_match_with_tolerance(
     tolerance_ratio: float,
     tolerance_seconds: float,
 ) -> bool:
-    """CSV duration sanity check with hybrid tolerance and anti-preview guard."""
+    """CSV duration sanity check with hybrid tolerance and anti-preview guard.
+
+    Returns False when ``actual_seconds`` is unavailable (None or <= 0) and
+    ``expected_ms`` is positive.  Callers that want best-effort / permissive
+    behaviour for unreadable files must guard before calling this function.
+    """
     if expected_ms is None or expected_ms <= 0:
         return True
     if actual_seconds is None or actual_seconds <= 0:
-        # Best-effort only: inability to read duration should not fail resolution.
-        return True
+        return False
     expected_seconds = expected_ms / 1000.0
     if actual_seconds < 45.0 and expected_seconds >= 90.0:
         return False
