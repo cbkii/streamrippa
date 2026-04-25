@@ -8,6 +8,7 @@ from ..client import Client, Downloadable
 from ..config import Config
 from ..db import Database
 from ..exceptions import DownloadError, NonStreamableError
+from ..file_lists import _duration_match_with_tolerance
 from ..filepath_utils import clean_filename
 from ..metadata import AlbumMetadata, Covers, TrackMetadata, tag_file
 from ..progress import add_title, get_progress_callback, remove_title
@@ -240,13 +241,28 @@ class Track(Media):
 
         if actual_seconds <= 0:
             return
-        expected_seconds = self.expected_duration_ms / 1000.0
-        delta = abs(actual_seconds - expected_seconds)
-        if actual_seconds < 45.0 and delta > 25.0:
+
+        csv_cfg = getattr(self.config.session, "csv_resolver", None)
+        tolerance_ratio = float(
+            getattr(csv_cfg, "local_skip_duration_tolerance_ratio", 0.20) or 0.20
+        )
+        tolerance_seconds = float(
+            getattr(csv_cfg, "local_skip_duration_tolerance_seconds", 12) or 12
+        )
+
+        is_match = _duration_match_with_tolerance(
+            self.expected_duration_ms,
+            actual_seconds,
+            tolerance_ratio=tolerance_ratio,
+            tolerance_seconds=tolerance_seconds,
+        )
+
+        if not is_match:
+            expected_seconds = self.expected_duration_ms / 1000.0
             try:
                 os.remove(self.download_path)
             except OSError as e:
-                self.logger.warning(
+                logger.warning(
                     "Could not remove invalid download '%s': %s",
                     self.download_path,
                     e,

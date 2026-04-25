@@ -182,7 +182,7 @@ truncate_to = 120
 source = "qobuz"
 # If no results were found with the primary source, the item is searched for 
 # on this one.
-fallback_source = ""
+fallback_source = "deezer"
 
 [cli]
 # Print "Downloading {Album name}" etc. to screen

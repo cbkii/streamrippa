@@ -34,7 +34,9 @@ import logging
 import os
 import random
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from time import monotonic
 
 from rich.text import Text
@@ -46,6 +48,8 @@ from ..db import Database
 from ..exceptions import NonStreamableError
 from ..file_lists import (
     ExportifyCsvRow,
+    _artist_overlap,
+    _duration_match_with_tolerance,
     is_usable_exportify_row,
     score_candidate,
     score_candidate_repair,
@@ -70,8 +74,14 @@ _SEARCH_LIMIT = 8
 # Expanded search window used in repair mode for heavier matching
 _REPAIR_SEARCH_LIMIT = 15
 _MIN_ACCEPTABLE_SCORE = 50
-_MIN_ACCEPTABLE_SCORE_REPAIR = 30
+_MIN_ACCEPTABLE_SCORE_REPAIR = 50
 _SHORTLIST_K = 3
+_DEFAULT_LOW_SCORE_FLOOR = 25
+
+REASON_NO_RESULTS = "no results"
+REASON_SEARCH_FAILURE = "search failure"
+REASON_LOW_CONFIDENCE = "low confidence"
+REASON_QUALITY_UNAVAILABLE = "quality unavailable"
 
 
 @dataclass(slots=True)
@@ -86,6 +96,35 @@ class _ProviderBudget:
     rate_limited_count: int = 0
     auth_error_count: int = 0
     disabled: bool = False
+
+
+async def _budgeted_get_raw_metadata(
+    candidate: "TrackCandidate",
+    provider_budgets: "dict[str, _ProviderBudget] | None",
+    provider_wait_fn: Callable[[str], Awaitable[None]],
+    provider_after_call_fn: Callable[[str, bool, Exception | None], None],
+) -> dict:
+    """Fetch raw track metadata for *candidate* honouring provider semaphores and cooldowns.
+
+    Acquires the per-source ``metadata_sem``, waits for any cooldown, then
+    calls ``candidate.client.get_metadata``.  On success invokes
+    ``provider_after_call_fn(source, ok=True, err=None)`` and returns the raw
+    response dict.  On any exception invokes
+    ``provider_after_call_fn(source, ok=False, err=e)`` and re-raises so the
+    caller can handle specific exception types.
+    """
+    try:
+        if provider_budgets is not None and candidate.source in provider_budgets:
+            async with provider_budgets[candidate.source].metadata_sem:
+                await provider_wait_fn(candidate.source)
+                resp = await candidate.client.get_metadata(candidate.id, "track")
+        else:
+            resp = await candidate.client.get_metadata(candidate.id, "track")
+        provider_after_call_fn(candidate.source, ok=True, err=None)
+        return resp
+    except Exception as e:
+        provider_after_call_fn(candidate.source, ok=False, err=e)
+        raise
 
 
 def _session_country_hint() -> str:
@@ -208,6 +247,59 @@ def _item_duration_ms(source: str, item: dict) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _first_artist(row: ExportifyCsvRow) -> str:
+    if row.artists_list:
+        return row.artists_list[0]
+    return row.artists_raw
+
+
+def _normalize_local_lookup_text(value: str) -> str:
+    value = strip_title_decorators(value or "")
+    # Fold separators/punctuation conservatively to reduce formatting variance
+    # without broadening matching into wildcard behavior.
+    value = value.casefold().replace("&", " and ")
+    value = re.sub(r"[/|+]+", " ", value)
+    value = re.sub(r"['`]", "", value)
+    value = re.sub(r"[^\w\s]", " ", value)
+    return " ".join(value.split())
+
+
+def _row_local_lookup_keys(row: ExportifyCsvRow) -> list[str]:
+    title = _normalize_local_lookup_text(row.track_name)
+    stripped = _normalize_local_lookup_text(row.canonical_track_name or row.track_name)
+    artist = _normalize_local_lookup_text(_first_artist(row))
+    album = _normalize_local_lookup_text(row.album)
+    keys = []
+    for maybe in (title, stripped):
+        if maybe:
+            if artist and album:
+                keys.append(f"{maybe}::{artist}::{album}")
+            if artist:
+                keys.append(f"{maybe}::{artist}")
+            if album:
+                keys.append(f"{maybe}::{album}")
+            keys.append(maybe)
+    # stable de-dupe
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in keys:
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _file_local_lookup_keys(path: Path) -> list[str]:
+    stem = _normalize_local_lookup_text(path.stem)
+    parent = _normalize_local_lookup_text(path.parent.name)
+    if not stem:
+        return []
+    keys = [stem]
+    if parent:
+        keys.append(f"{stem}::{parent}")
+    return keys
+
+
 def _build_search_queries(
     row: ExportifyCsvRow, source: str, *, escalation: bool = False
 ) -> list[tuple[str, str]]:
@@ -326,11 +418,10 @@ def _pick_best_candidate_repair(
     pages: list[dict],
     client: Client,
 ) -> TrackCandidate | None:
-    """Repair-mode variant of :func:`_pick_best_candidate`.
+    """Legacy repair helper retained for compatibility/tests.
 
-    Uses :func:`~streamrip.file_lists.score_candidate_repair` which includes
-    fuzzy title matching as a fallback when exact title matching fails.  Only
-    used from :class:`PendingCsvPlaylist` when ``repair_mode=True``.
+    The active resolver path uses :func:`_pick_top_candidates`; this function
+    remains as a small adapter for tests and compatibility.
     """
     items = _extract_raw_results(source, pages)
     if not items:
@@ -377,9 +468,9 @@ def _pick_best_candidate_repair(
 
 def _candidate_reason(candidate: TrackCandidate | None, min_score: int) -> str:
     if candidate is None:
-        return "no results"
+        return REASON_NO_RESULTS
     if candidate.score < min_score:
-        return f"low confidence ({candidate.score}<{min_score})"
+        return f"{REASON_LOW_CONFIDENCE} ({candidate.score}<{min_score})"
     return "matched"
 
 
@@ -747,7 +838,7 @@ class PendingCsvTrack(Pending):
         if "download failed" in statuses:
             return "download attempt failed after a valid service/quality match"
         if "quality unavailable" in statuses:
-            return "matched item available, but requested/highest quality unavailable"
+            return REASON_QUALITY_UNAVAILABLE
         if "provider-error" in statuses:
             return "provider error while resolving matched candidate metadata"
         if "metadata-error" in statuses:
@@ -796,18 +887,13 @@ class PendingCsvTrack(Pending):
                 return _MetaFetchResult(status=cached_status)
 
         try:
-            if (
-                self.provider_budgets is not None
-                and candidate.source in self.provider_budgets
-            ):
-                async with self.provider_budgets[candidate.source].metadata_sem:
-                    await self._provider_wait(candidate.source)
-                    resp = await candidate.client.get_metadata(candidate.id, "track")
-            else:
-                resp = await candidate.client.get_metadata(candidate.id, "track")
-            self._provider_after_call(candidate.source, ok=True, err=None)
+            resp = await _budgeted_get_raw_metadata(
+                candidate,
+                self.provider_budgets,
+                self._provider_wait,
+                self._provider_after_call,
+            )
         except NonStreamableError as e:
-            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Could not fetch metadata for %s:%s: %s",
                 candidate.source,
@@ -818,7 +904,6 @@ class PendingCsvTrack(Pending):
                 self.negative_candidate_cache[cache_key] = "matched unavailable"
             return _MetaFetchResult(status="matched unavailable")
         except Exception as e:
-            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Unexpected error fetching metadata for %s:%s: %s",
                 candidate.source,
@@ -985,12 +1070,14 @@ class PendingCsvPlaylist(Pending):
 
     Runs searches on both *primary_client* and *fallback_client* (if present)
     in bounded batches, scores the results, and yields :class:`PendingCsvTrack`
-    items that implement the service-first / quality-second fallback.
+    items that implement per-pass quality-priority over source:
+    primary@quality[i] -> fallback@quality[i] -> next lower quality.
 
     When ``repair_mode=True`` the resolver uses an expanded search window
     (:data:`_REPAIR_SEARCH_LIMIT`) and fuzzy title scoring
     (:func:`_pick_best_candidate_repair`) to recover rows that the lightweight
-    main-path scorer left unresolved.
+    main-path scorer left unresolved. Optional guarded low-score acceptance is
+    available only in repair mode.
     """
 
     playlist_name: str
@@ -1000,15 +1087,24 @@ class PendingCsvPlaylist(Pending):
     config: Config
     db: Database
     repair_mode: bool = False
+    accept_lowscore: bool = False
+    lowscore_floor: int = _DEFAULT_LOW_SCORE_FLOOR
     query_cache: dict[tuple[str, str, int], list[dict]] | None = None
     provider_budgets: dict[str, _ProviderBudget] | None = None
     negative_candidate_cache: dict[tuple[str, str], str] | None = None
+    local_file_index: dict[str, list[Path]] | None = None
+    local_duration_cache: dict[str, float | None] | None = None
+    local_skipped_count: int = 0
+    low_score_accepted_count: int = 0
+    unresolved_count: int = 0
 
     @dataclass(slots=True)
     class Status:
         found: int
         failed: int
         unresolved: int
+        local_skipped: int
+        low_score_accepted: int
         total: int
 
         def text(self) -> Text:
@@ -1020,6 +1116,10 @@ class PendingCsvPlaylist(Pending):
                 ", ",
                 (f"{self.unresolved} unresolved", "bold yellow"),
                 ", ",
+                (f"{self.local_skipped} local-skip", "bold cyan"),
+                ", ",
+                (f"{self.low_score_accepted} low-score accepted", "bold magenta"),
+                ", ",
                 (f"{self.total} total", "bold"),
                 ")",
             )
@@ -1029,6 +1129,125 @@ class PendingCsvPlaylist(Pending):
 
     def _csv_cfg(self):
         return getattr(self.config.session, "csv_resolver", None)
+
+    def _get_duration_tolerance(self) -> tuple[float, float]:
+        csv_cfg = self._csv_cfg()
+        ratio_val = getattr(csv_cfg, "local_skip_duration_tolerance_ratio", None)
+        ratio = float(ratio_val) if ratio_val is not None else 0.20
+        seconds_val = getattr(csv_cfg, "local_skip_duration_tolerance_seconds", None)
+        seconds = float(seconds_val) if seconds_val is not None else 12.0
+        return max(0.0, ratio), max(0.0, seconds)
+
+    def _build_local_index(self) -> None:
+        """Build one deterministic local-file lookup index for this playlist run."""
+        if self.local_file_index is not None:
+            return
+        csv_cfg = self._csv_cfg()
+        if not bool(getattr(csv_cfg, "local_skip_enabled", False)):
+            return
+
+        configured_paths = list(getattr(csv_cfg, "local_skip_paths", []) or [])
+        roots = configured_paths or [self.config.session.downloads.folder]
+        extensions = {
+            str(ext).strip().casefold().lstrip(".")
+            for ext in (getattr(csv_cfg, "local_skip_extensions", []) or [])
+            if str(ext).strip()
+        }
+        if not extensions:
+            extensions = {"flac", "mp3", "m4a", "ogg", "opus", "aac"}
+
+        max_scan = int(getattr(csv_cfg, "local_skip_max_file_scan", 25000) or 25000)
+        max_scan = max(1, max_scan)
+
+        index: dict[str, list[Path]] = {}
+        scanned = 0
+        for root in sorted({str(Path(p).expanduser()) for p in roots if p}):
+            if scanned >= max_scan:
+                break
+            if not os.path.isdir(root):
+                continue
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
+                filenames.sort()
+                for name in filenames:
+                    if scanned >= max_scan:
+                        break
+                    path = Path(dirpath) / name
+                    if path.suffix.casefold().lstrip(".") not in extensions:
+                        continue
+                    scanned += 1
+                    for key in _file_local_lookup_keys(path):
+                        index.setdefault(key, []).append(path)
+                if scanned >= max_scan:
+                    break
+
+        for key in index:
+            index[key] = sorted(index[key], key=lambda p: str(p))
+        self.local_file_index = index
+        if self.local_duration_cache is None:
+            self.local_duration_cache = {}
+        logger.info(
+            "CSV local-skip index built: %d keys from %d files (cap=%d)",
+            len(index),
+            scanned,
+            max_scan,
+        )
+
+    def _duration_for_local_path(self, path: Path) -> float | None:
+        if self.local_duration_cache is None:
+            self.local_duration_cache = {}
+        key = str(path)
+        if key in self.local_duration_cache:
+            return self.local_duration_cache[key]
+        try:
+            from mutagen import File as MutagenFile
+            from mutagen import MutagenError
+
+            info = MutagenFile(str(path))
+            seconds = float(getattr(getattr(info, "info", None), "length", 0.0))
+            self.local_duration_cache[key] = seconds if seconds > 0 else None
+        except (MutagenError, OSError, ValueError) as e:
+            logger.warning("local-skip duration read failed for '%s': %s", path, e)
+            self.local_duration_cache[key] = None
+        return self.local_duration_cache[key]
+
+    def _try_local_skip(self, row: ExportifyCsvRow) -> tuple[bool, str, str]:
+        csv_cfg = self._csv_cfg()
+        if self.local_file_index is None:
+            return False, "", "local-skip-disabled"
+        require_duration = bool(
+            getattr(csv_cfg, "local_skip_require_duration_check", True)
+        )
+        ratio, seconds = self._get_duration_tolerance()
+        saw_ambiguous = False
+        saw_duration_mismatch = False
+        for key in _row_local_lookup_keys(row):
+            matches = sorted({str(p) for p in self.local_file_index.get(key, [])})
+            if len(matches) > 1:
+                saw_ambiguous = True
+                continue
+            for path in matches:
+                if require_duration:
+                    if not row.duration_ms:
+                        # Duration check required but CSV row has no duration field:
+                        # don't accept as a local skip to respect user intent.
+                        continue
+                    actual = self._duration_for_local_path(Path(path))
+                    if not _duration_match_with_tolerance(
+                        row.duration_ms,
+                        actual,
+                        tolerance_ratio=ratio,
+                        tolerance_seconds=seconds,
+                    ):
+                        saw_duration_mismatch = True
+                        continue
+                    return True, path, "duration-validated-local"
+                return True, path, "exact-local"
+        if saw_ambiguous:
+            return False, "", "ambiguous-local-not-skipped"
+        if saw_duration_mismatch:
+            return False, "", "duration-mismatch-local-not-skipped"
+        return False, "", "no-local-match"
 
     def _init_provider_budgets(self) -> None:
         csv_cfg = self._csv_cfg()
@@ -1141,8 +1360,9 @@ class PendingCsvPlaylist(Pending):
         parent = self.config.session.downloads.folder
         folder = os.path.join(parent, clean_filepath(self.playlist_name))
 
-        status = self.Status(0, 0, 0, len(self.rows))
+        status = self.Status(0, 0, 0, 0, 0, len(self.rows))
         fail_fast = self.config.session.reliability.fail_fast
+        self._build_local_index()
 
         primary_qualities = _build_quality_sequence(
             self.primary_client.source,
@@ -1219,12 +1439,17 @@ class PendingCsvPlaylist(Pending):
                     raise self.FailFastAbortError(message)
 
         logger.info(
-            "CSV resolve complete: %d found, %d failed, %d unresolved out of %d rows",
+            "CSV resolve complete: %d found, %d failed, %d unresolved, %d local-skipped, %d low-score accepted out of %d rows",
             status.found,
             status.failed,
             status.unresolved,
+            status.local_skipped,
+            status.low_score_accepted,
             status.total,
         )
+        self.local_skipped_count = status.local_skipped
+        self.low_score_accepted_count = status.low_score_accepted
+        self.unresolved_count = status.unresolved
 
         if not pending_tracks:
             logger.warning(
@@ -1273,6 +1498,15 @@ class PendingCsvPlaylist(Pending):
         min_score = (
             _MIN_ACCEPTABLE_SCORE_REPAIR if self.repair_mode else _MIN_ACCEPTABLE_SCORE
         )
+        low_score_floor = max(
+            0,
+            int(
+                self.lowscore_floor
+                if self.lowscore_floor is not None
+                else _DEFAULT_LOW_SCORE_FLOOR
+            ),
+        )
+        ratio, seconds = self._get_duration_tolerance()
 
         primary_outcome = ResolverOutcome(None, "no results", "", "")
         fallback_outcome = ResolverOutcome(None, "no results", "", "")
@@ -1303,6 +1537,32 @@ class PendingCsvPlaylist(Pending):
             if callback:
                 await callback()
             return None
+
+        local_skip_hit, local_path, local_reason = self._try_local_skip(row)
+        if local_skip_hit:
+            status.local_skipped += 1
+            self.db.set_skipped()
+            logger.debug(
+                "CSV local-skip (%s) matched path '%s' for row %d (%s - %s)",
+                local_reason,
+                local_path,
+                row.row_index,
+                row.track_name,
+                row.artists_raw,
+            )
+            if callback:
+                await callback()
+            return None
+        if local_reason in {
+            "ambiguous-local-not-skipped",
+            "duration-mismatch-local-not-skipped",
+        }:
+            logger.debug(
+                "CSV local-skip did not skip row %d (%s): %s",
+                row.row_index,
+                row.track_name,
+                local_reason,
+            )
 
         async def _resolve_for_client(
             client: Client,
@@ -1465,13 +1725,13 @@ class PendingCsvPlaylist(Pending):
             if had_error:
                 return ResolverOutcome(
                     candidate=None,
-                    reason="search_failed",
+                    reason=REASON_SEARCH_FAILURE,
                     query=last_query,
                     strategy=last_strategy,
                 )
             return ResolverOutcome(
                 candidate=None,
-                reason="no results",
+                reason=REASON_NO_RESULTS,
                 query=queries[-1][1] if queries else "",
                 strategy=queries[-1][0] if queries else "",
             )
@@ -1522,6 +1782,104 @@ class PendingCsvPlaylist(Pending):
             and fallback_outcome.candidate.score >= min_score
             else None
         )
+
+        async def _guarded_low_score_candidate(
+            outcome: ResolverOutcome | None,
+        ) -> TrackCandidate | None:
+            if not self.repair_mode or not self.accept_lowscore or outcome is None:
+                return None
+            candidate = outcome.candidate
+            if candidate is None:
+                return None
+            if candidate.score < low_score_floor or candidate.score >= min_score:
+                return None
+            if not row.artists_list and not row.artists_raw:
+                return None
+            if not _artist_overlap(
+                row.artists_list or [row.artists_raw], candidate.artist
+            ):
+                return None
+            # Duration sanity: only enforced when expected exists.
+            if row.duration_ms:
+                try:
+                    resp = await _budgeted_get_raw_metadata(
+                        candidate,
+                        self.provider_budgets,
+                        self._provider_wait,
+                        self._provider_after_call,
+                    )
+                    duration_ms = _item_duration_ms(candidate.source, resp)
+                    actual_seconds = (duration_ms / 1000.0) if duration_ms else None
+                except Exception as e:
+                    logger.debug(
+                        "Low-score duration guard read failed for %s:%s: %s",
+                        candidate.source,
+                        candidate.id,
+                        e,
+                    )
+                    actual_seconds = None
+                if not _duration_match_with_tolerance(
+                    row.duration_ms,
+                    actual_seconds,
+                    tolerance_ratio=ratio,
+                    tolerance_seconds=seconds,
+                ):
+                    return None
+            return candidate
+
+        # choose best guarded low-score candidate if strict acceptance failed
+        if (
+            primary_candidate is None
+            and fallback_candidate is None
+            and self.repair_mode
+            and self.accept_lowscore
+        ):
+            gathered_results = await asyncio.gather(
+                _guarded_low_score_candidate(primary_outcome),
+                _guarded_low_score_candidate(fallback_outcome),
+                return_exceptions=True,
+            )
+            low_candidates = [
+                c for c in gathered_results if isinstance(c, TrackCandidate)
+            ]
+            if low_candidates:
+                if (
+                    len(low_candidates) > 1
+                    and (low_candidates[0].source, low_candidates[0].id)
+                    != (low_candidates[1].source, low_candidates[1].id)
+                    and abs(low_candidates[0].score - low_candidates[1].score) <= 3
+                ):
+                    logger.warning(
+                        "Repair low-score rejected '%s' due to ambiguous competing candidates: %s:%s(score=%d) vs %s:%s(score=%d)",
+                        row.track_name,
+                        low_candidates[0].source,
+                        low_candidates[0].id,
+                        low_candidates[0].score,
+                        low_candidates[1].source,
+                        low_candidates[1].id,
+                        low_candidates[1].score,
+                    )
+                else:
+                    picked = sorted(
+                        low_candidates,
+                        key=lambda c: (
+                            c.score,
+                            1 if c.source == self.primary_client.source else 0,
+                        ),
+                        reverse=True,
+                    )[0]
+                    if picked.source == self.primary_client.source:
+                        primary_candidate = picked
+                    else:
+                        fallback_candidate = picked
+                    status.low_score_accepted += 1
+                    logger.warning(
+                        "Repair low-score accepted '%s' via %s score=%d floor=%d",
+                        row.track_name,
+                        picked.source,
+                        picked.score,
+                        low_score_floor,
+                    )
 
         if primary_candidate is None and fallback_candidate is None:
             failure_reasons = ", ".join(

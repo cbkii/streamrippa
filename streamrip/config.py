@@ -141,6 +141,27 @@ class CsvResolverConfig:
     failure_streak_for_cooldown: int
     # Extra search limit used by escalation lane
     escalation_search_limit: int
+    # Default CSV primary provider/source key when CLI does not specify one.
+    default_source: str
+    # Default CSV fallback provider/source key when CLI does not specify one.
+    default_fallback_source: str
+    # Enable pre-resolution local-file checks to skip provider API work for rows
+    # already present on disk (opt-in; default false).
+    local_skip_enabled: bool
+    # Optional folders to scan for existing files. Empty list falls back to
+    # downloads.folder.
+    local_skip_paths: list[str]
+    # File extensions considered for local-skip matching.
+    local_skip_extensions: list[str]
+    # Require expected-vs-actual duration sanity check when expected duration is
+    # present in the CSV row.
+    local_skip_require_duration_check: bool
+    # Relative duration tolerance used by local skip and CSV duration sanity.
+    local_skip_duration_tolerance_ratio: float
+    # Absolute duration tolerance (seconds) used by local skip and CSV duration sanity.
+    local_skip_duration_tolerance_seconds: int
+    # Safety cap for number of files scanned into local-skip index.
+    local_skip_max_file_scan: int
 
 
 @dataclass(slots=True)

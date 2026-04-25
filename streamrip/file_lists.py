@@ -605,3 +605,29 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
                 )
             )
     return rows
+
+
+def _duration_match_with_tolerance(
+    expected_ms: int | None,
+    actual_seconds: float | None,
+    *,
+    tolerance_ratio: float,
+    tolerance_seconds: float,
+) -> bool:
+    """CSV duration sanity check with hybrid tolerance and anti-preview guard.
+
+    Returns False when ``actual_seconds`` is unavailable (None or <= 0) and
+    ``expected_ms`` is positive.  Callers that want best-effort / permissive
+    behaviour for unreadable files must guard before calling this function.
+    """
+    if expected_ms is None or expected_ms <= 0:
+        return True
+    if actual_seconds is None or actual_seconds <= 0:
+        return False
+    expected_seconds = expected_ms / 1000.0
+    if actual_seconds < 45.0 and expected_seconds >= 90.0:
+        return False
+    allowed_delta = max(
+        float(tolerance_seconds), expected_seconds * float(tolerance_ratio)
+    )
+    return abs(actual_seconds - expected_seconds) <= allowed_delta

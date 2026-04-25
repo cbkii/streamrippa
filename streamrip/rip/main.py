@@ -386,6 +386,8 @@ class Main:
         fallback_source: str,
         unresolved_log_path: str | None = None,
         repair_mode: bool = False,
+        accept_lowscore: bool = False,
+        lowscore_floor: int = 25,
     ) -> None:
         """Resolve an Exportify CSV row list into a downloadable playlist.
 
@@ -399,6 +401,8 @@ class Main:
                 matching (:class:`~streamrip.media.csv_playlist.PendingCsvPlaylist`
                 ``repair_mode=True``) to recover rows left unresolved on the main
                 import path.
+            accept_lowscore: Repair-only opt-in for guarded low-score acceptance.
+            lowscore_floor: Minimum score for low-score acceptance.
         """
         from ..file_lists import partition_exportify_rows_artist_batched
 
@@ -429,9 +433,13 @@ class Main:
         fail_fast = self.config.session.reliability.fail_fast
         top_level_failures = 0
         provider_health: dict[str, dict[str, int]] = {}
+        local_skipped_total = 0
+        low_score_accept_total = 0
+        unresolved_total = 0
         shared_query_cache: dict[tuple[str, str, int], list[dict]] | None = None
         shared_negative_candidate_cache: dict[tuple[str, str], str] | None = None
         shared_provider_budgets = None
+        shared_local_file_index = None
         # Keep a defensive fallback because tests patch PendingCsvPlaylist with fakes
         # that may not define the resolver-specific fail-fast exception type.
         fail_fast_abort_type = getattr(PendingCsvPlaylist, "FailFastAbortError", None)
@@ -440,37 +448,21 @@ class Main:
             logger.info(
                 "Resolving CSV batch %d/%d (%d rows)", idx, len(batches), len(batch)
             )
-            try:
-                pending_playlist = PendingCsvPlaylist(
-                    playlist_name=playlist_name,
-                    rows=batch,
-                    primary_client=primary_client,
-                    fallback_client=fallback_client,
-                    config=self.config,
-                    db=self.database,
-                    repair_mode=repair_mode,
-                    query_cache=shared_query_cache,
-                    negative_candidate_cache=shared_negative_candidate_cache,
-                    provider_budgets=shared_provider_budgets,
-                )
-            except TypeError:
-                pending_playlist = PendingCsvPlaylist(
-                    playlist_name=playlist_name,
-                    rows=batch,
-                    primary_client=primary_client,
-                    fallback_client=fallback_client,
-                    config=self.config,
-                    db=self.database,
-                    repair_mode=repair_mode,
-                )
-                if hasattr(pending_playlist, "query_cache"):
-                    pending_playlist.query_cache = shared_query_cache
-                if hasattr(pending_playlist, "negative_candidate_cache"):
-                    pending_playlist.negative_candidate_cache = (
-                        shared_negative_candidate_cache
-                    )
-                if hasattr(pending_playlist, "provider_budgets"):
-                    pending_playlist.provider_budgets = shared_provider_budgets
+            pending_playlist = PendingCsvPlaylist(
+                playlist_name=playlist_name,
+                rows=batch,
+                primary_client=primary_client,
+                fallback_client=fallback_client,
+                config=self.config,
+                db=self.database,
+                repair_mode=repair_mode,
+                accept_lowscore=accept_lowscore,
+                lowscore_floor=lowscore_floor,
+                query_cache=shared_query_cache,
+                negative_candidate_cache=shared_negative_candidate_cache,
+                provider_budgets=shared_provider_budgets,
+                local_file_index=shared_local_file_index,
+            )
 
             failures_before = self.database.stats.failed
             try:
@@ -481,6 +473,9 @@ class Main:
                     pending_playlist, "negative_candidate_cache", None
                 )
                 shared_provider_budgets = budgets
+                shared_local_file_index = getattr(
+                    pending_playlist, "local_file_index", None
+                )
                 if budgets is not None:
                     for provider, budget in budgets.items():
                         metrics = provider_health.setdefault(
@@ -494,10 +489,21 @@ class Main:
                         metrics["cooldowns"] += budget.cooldown_count
                         metrics["rate_limited"] += budget.rate_limited_count
                         metrics["auth_errors"] += budget.auth_error_count
+                local_skipped_total += int(
+                    getattr(pending_playlist, "local_skipped_count", 0) or 0
+                )
+                low_score_accept_total += int(
+                    getattr(pending_playlist, "low_score_accepted_count", 0) or 0
+                )
+                unresolved_total += int(
+                    getattr(pending_playlist, "unresolved_count", 0) or 0
+                )
                 if playlist is None:
                     continue
 
-                # Start downloads as soon as each batch resolves.
+                # CSV flow is intentionally resolve->download per batch.
+                # main.rip() at the command level then prints session summary /
+                # top-level accounting only.
                 await playlist.rip()
             except Exception as e:
                 logger.error("Error processing CSV batch %d: %s", idx, e)
@@ -525,6 +531,14 @@ class Main:
                     metrics["rate_limited"],
                     metrics["auth_errors"],
                 )
+        logger.info(
+            "CSV resolver metrics: local_skipped=%d, low_score_accepted=%d, unresolved=%d",
+            local_skipped_total,
+            low_score_accept_total,
+            unresolved_total,
+        )
+        if repair_mode:
+            logger.info("CSV repair unresolved rows after pass: %d", unresolved_total)
 
         if self.database.unresolved_log and self.database.unresolved_log.has_entries:
             console.print(
@@ -537,6 +551,9 @@ class Main:
         unresolved_csv_path: str,
         source: str,
         fallback_source: str,
+        *,
+        accept_lowscore: bool = False,
+        lowscore_floor: int = 25,
     ) -> None:
         """
         Re-run resolution for rows in an unresolved Exportify CSV log using repair-mode matching.
@@ -547,6 +564,8 @@ class Main:
             unresolved_csv_path (str): Path to the "*_unresolved.csv" log file to repair.
             source (str): Primary search source (e.g. "qobuz").
             fallback_source (str): Fallback search source; empty string disables fallback.
+            accept_lowscore (bool): Opt-in guarded low-score acceptance in repair.
+            lowscore_floor (int): Minimum score allowed for low-score acceptance.
         """
         from ..file_lists import parse_unresolved_csv
 
@@ -620,6 +639,8 @@ class Main:
             fallback_source=fallback_source,
             unresolved_log_path=repair_unresolved_path,
             repair_mode=True,
+            accept_lowscore=accept_lowscore,
+            lowscore_floor=lowscore_floor,
         )
 
     async def __aenter__(self):
