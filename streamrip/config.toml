@@ -166,15 +166,22 @@ remaster_mode = "equivalent"
 year_ignore_for_remaster = true
 # Reject obvious junk release contexts (karaoke, tribute, commentary, podcast, etc).
 reject_bad_context_releases = true
-# Include-only fields scanned for bad-context markers. Unknown fields are ignored.
-# Env override: STREAMRIP_BAD_CONTEXT_FIELDS=title,album,version
+# Fields scanned for bad-context markers (e.g. "karaoke", "nightcore", "reverb").
+# Supported values: "title", "album", "artist", "version", "subtitle", "display_title"
+# Comma-separated env override: STREAMRIP_BAD_CONTEXT_FIELDS=title,album,artist
+# Default: ["title", "album"]
 bad_context_fields = ["title", "album"]
-# Optional per-provider minimum acceptance score. Empty map keeps existing defaults.
+# Optional per-provider minimum acceptance score (integer 0-100).
+# When empty, the built-in defaults are used (~47 normal, ~40 repair).
 # Example: acceptance_threshold_by_source = { qobuz = 52, deezer = 50 }
 acceptance_threshold_by_source = {}
-# Optional JSONL file path for candidate scoring telemetry (empty disables).
+# Optional JSONL file path for candidate scoring telemetry.
+# Empty string disables telemetry. Example: telemetry_jsonl_path = "/tmp/resolver.jsonl"
 telemetry_jsonl_path = ""
-# Optional guarded fuzzy fallback in normal mode (strict high-similarity + corroboration).
+# Enable guarded fuzzy title matching in normal (non-repair) mode.
+# When true, candidates whose normalised title similarity is >= 0.90, with
+# matching artist AND (matching album or close duration), are accepted.
+# Default: false (safe conservative behaviour).
 enable_guarded_fuzzy_normal = false
 
 # Filter a Qobuz artist's discography. Set to 'true' to turn on a filter.

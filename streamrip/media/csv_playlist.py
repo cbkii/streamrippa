@@ -249,9 +249,9 @@ def _item_date(source: str, item: dict) -> str:
         )
     if source == "tidal":
         return _first_nonempty(
-            item.get("copyrightYear"),
             item.get("streamStartDate"),
             item.get("album", {}).get("releaseDate"),
+            item.get("copyrightYear"),
         )
     return ""
 
@@ -530,7 +530,7 @@ def _provider_threshold(csv_cfg, source: str, *, repair_mode: bool) -> int:
     if isinstance(raw_map, dict):
         raw = raw_map.get(source, default_threshold)
         try:
-            return int(raw)
+            threshold = int(raw)
         except (TypeError, ValueError):
             logger.warning(
                 "Invalid csv_resolver.acceptance_threshold_by_source value for '%s': %r; using default=%d",
@@ -539,6 +539,15 @@ def _provider_threshold(csv_cfg, source: str, *, repair_mode: bool) -> int:
                 default_threshold,
             )
             return default_threshold
+        if 0 <= threshold <= 100:
+            return threshold
+        logger.warning(
+            "Out-of-range csv_resolver.acceptance_threshold_by_source value for '%s': %r (must be 0-100); using default=%d",
+            source,
+            raw,
+            default_threshold,
+        )
+        return default_threshold
     if raw_map:
         logger.warning(
             "Invalid csv_resolver.acceptance_threshold_by_source type %s; using defaults",
@@ -1786,7 +1795,9 @@ class PendingCsvPlaylist(Pending):
                 )
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
             closest_rejected: list[TrackCandidate] = []
-            seen_candidate_scores: list[int] = []
+            # Track best score per candidate ID to avoid double-counting the same
+            # track returned by multiple query strategies (structured + generic).
+            best_score_by_id: dict[str, int] = {}
             had_error = False
             last_query = ""
             last_strategy = ""
@@ -1861,19 +1872,21 @@ class PendingCsvPlaylist(Pending):
                         client=client,
                     )
                     reason = _candidate_reason(hinted_candidate, provider_min_score)
+                    # Build population from deduplicated best-per-ID scores so
+                    # margin_to_second is not deflated by repeat query hits.
+                    _cid = hinted_candidate.id
+                    best_score_by_id[_cid] = max(
+                        best_score_by_id.get(_cid, 0), hinted_candidate.score
+                    )
+                    _population = list(best_score_by_id.values())
                     hinted_candidate.confidence = _confidence_for_candidate(
                         hinted_candidate,
                         provider_min_score,
-                        _margin_to_second_best(
-                            hinted_candidate.score,
-                            [*seen_candidate_scores, hinted_candidate.score],
-                        ),
+                        _margin_to_second_best(hinted_candidate.score, _population),
                     )
                     hinted_candidate.margin_to_second = _margin_to_second_best(
-                        hinted_candidate.score,
-                        [*seen_candidate_scores, hinted_candidate.score],
+                        hinted_candidate.score, _population
                     )
-                    seen_candidate_scores.append(hinted_candidate.score)
                     if reason == "matched":
                         return ResolverOutcome(
                             candidate=hinted_candidate,
@@ -1930,17 +1943,19 @@ class PendingCsvPlaylist(Pending):
                         policy=match_policy,
                     )
                     if top_candidates:
-                        batch_scores = [cand.score for cand in top_candidates]
-                        population_scores = seen_candidate_scores + batch_scores
-                        for idx, cand in enumerate(top_candidates):
-                            _ = idx
+                        for cand in top_candidates:
+                            _cid = cand.id
+                            best_score_by_id[_cid] = max(
+                                best_score_by_id.get(_cid, 0), cand.score
+                            )
+                        _population = list(best_score_by_id.values())
+                        for cand in top_candidates:
                             cand.margin_to_second = _margin_to_second_best(
-                                cand.score, population_scores
+                                cand.score, _population
                             )
                             cand.confidence = _confidence_for_candidate(
                                 cand, provider_min_score, cand.margin_to_second
                             )
-                        seen_candidate_scores.extend(batch_scores)
                 except Exception as e:
                     self._provider_after_call(client.source, ok=False, err=e)
                     if (
@@ -2001,6 +2016,7 @@ class PendingCsvPlaylist(Pending):
                 reason=REASON_NO_RESULTS,
                 query=queries[-1][1] if queries else "",
                 strategy=queries[-1][0] if queries else "",
+                rejected=closest_rejected[:2],
             )
 
         primary_outcome = await _resolve_for_client(

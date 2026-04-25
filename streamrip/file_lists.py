@@ -10,6 +10,7 @@ Supports three modes:
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import logging
 import os
@@ -367,10 +368,19 @@ _BAD_CONTEXT_MARKERS: tuple[str, ...] = (
 # Variants that allow a bad-context candidate to still be accepted when the
 # CSV row itself explicitly requests one of these types.
 _BAD_CONTEXT_CARVEOUT_VARIANTS: frozenset[str] = frozenset(
-    {"karaoke", "tribute", "commentary", "slowed_sped", "slowed", "reverb"}
+    {"karaoke", "tribute", "commentary", "slowed_sped"}
 )
 _BAD_CONTEXT_SUPPORTED_FIELDS: frozenset[str] = frozenset(
-    {"title", "album", "version", "subtitle", "display_title"}
+    {"title", "album", "artist", "version", "subtitle", "display_title"}
+)
+# Pre-compiled pattern for bad-context marker scanning; sorted longest-first so
+# multi-word phrases (e.g. "made famous by") are tried before their substrings.
+_BAD_CONTEXT_PATTERN: re.Pattern[str] = re.compile(
+    r"\b("
+    + "|".join(
+        re.escape(m) for m in sorted(_BAD_CONTEXT_MARKERS, key=len, reverse=True)
+    )
+    + r")\b"
 )
 
 
@@ -492,11 +502,10 @@ def _contains_bad_context(title: str, album: str, artist: str) -> bool:
     full = _normalise(" ".join([title or "", album or "", artist or ""]))
     if not full:
         return False
-    return any(
-        re.search(rf"\b{re.escape(marker)}\b", full) for marker in _BAD_CONTEXT_MARKERS
-    )
+    return bool(_BAD_CONTEXT_PATTERN.search(full))
 
 
+@functools.lru_cache(maxsize=64)
 def _resolve_bad_context_fields(
     config_fields: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
@@ -530,7 +539,7 @@ def _contains_bad_context_fields(
     *,
     bad_context_fields: tuple[str, ...],
 ) -> bool:
-    field_values = {
+    field_values: dict[str, str] = {
         "title": candidate_title,
         "album": candidate_album,
         "version": candidate_title,
@@ -538,13 +547,19 @@ def _contains_bad_context_fields(
         "display_title": candidate_title,
         "artist": candidate_artist,
     }
-    text = " ".join(field_values.get(field, "") for field in bad_context_fields)
-    full = _normalise(text)
+    # Deduplicate backing values so the same string isn't scanned multiple times
+    # (e.g. "title", "version", and "subtitle" all resolve to candidate_title).
+    seen_values: set[str] = set()
+    parts: list[str] = []
+    for field in bad_context_fields:
+        value = field_values.get(field, "")
+        if value and value not in seen_values:
+            seen_values.add(value)
+            parts.append(value)
+    full = _normalise(" ".join(parts))
     if not full:
         return False
-    return any(
-        re.search(rf"\b{re.escape(marker)}\b", full) for marker in _BAD_CONTEXT_MARKERS
-    )
+    return bool(_BAD_CONTEXT_PATTERN.search(full))
 
 
 def _variant_mode(policy: MatchPolicy, marker: str) -> str:
@@ -615,7 +630,7 @@ def _score_candidate_internal(
     candidate_duration_ms: int | None = None,
     policy: MatchPolicy | None = None,
     *,
-    allow_guarded_fuzzy: bool,
+    allow_guarded_fuzzy: bool = True,
 ) -> CandidateExplanation:
     policy = policy or MatchPolicy()
     reasons: list[str] = []
@@ -668,15 +683,15 @@ def _score_candidate_internal(
         and bool(cand_title.core_title)
         and row_title.core_title == cand_title.core_title
     )
-    fuzzy_ratio = SequenceMatcher(
-        None, row_title.normalized, cand_title.normalized
-    ).ratio()
     signals["title_exact"] = exact_title
     signals["title_core"] = core_title_match
-    signals["title_similarity"] = round(fuzzy_ratio, 4)
     guarded_fuzzy_match = False
     if not exact_title and not core_title_match:
         if allow_guarded_fuzzy and policy.enable_guarded_fuzzy_normal:
+            fuzzy_ratio = SequenceMatcher(
+                None, row_title.normalized, cand_title.normalized
+            ).ratio()
+            signals["title_similarity"] = round(fuzzy_ratio, 4)
             artist_ok = _artist_overlap(row.artists_list, candidate_artist)
             album_ok = bool(
                 row.album
@@ -765,17 +780,13 @@ def _score_candidate_internal(
             elif row_album in cand_album or cand_album in row_album:
                 score += 2
 
-    row_has_remaster = "remaster" in row_title.variants
-    cand_has_remaster = "remaster" in cand_title.variants
+    _year_ignore_variants = ("remaster", "live", "remix")
+    row_has_variant = any(v in row_title.variants for v in _year_ignore_variants)
+    cand_has_variant = any(v in cand_title.variants for v in _year_ignore_variants)
     if not (
         policy.enabled
         and policy.year_ignore_for_remaster
-        and (
-            row_has_remaster
-            or cand_has_remaster
-            or "live" in cand_title.variants
-            or "remix" in cand_title.variants
-        )
+        and (row_has_variant or cand_has_variant)
     ):
         score += _year_bonus(row.release_date, candidate_date)
 
@@ -1023,9 +1034,29 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
             if override_primary_source and override_primary_id:
                 primary_source = override_primary_source
                 primary_candidate_id = override_primary_id
+            elif override_primary_source or override_primary_id:
+                logger.warning(
+                    "Row %d (%r): incomplete primary override "
+                    "(override_primary_source=%r, override_primary_candidate_id=%r); "
+                    "ignoring override and keeping original primary fields",
+                    source_row_index,
+                    (row.get("track_name") or "").strip(),
+                    override_primary_source,
+                    override_primary_id,
+                )
             if override_fallback_source and override_fallback_id:
                 fallback_source = override_fallback_source
                 fallback_candidate_id = override_fallback_id
+            elif override_fallback_source or override_fallback_id:
+                logger.warning(
+                    "Row %d (%r): incomplete fallback override "
+                    "(override_fallback_source=%r, override_fallback_candidate_id=%r); "
+                    "ignoring override and keeping original fallback fields",
+                    source_row_index,
+                    (row.get("track_name") or "").strip(),
+                    override_fallback_source,
+                    override_fallback_id,
+                )
             if primary_source and primary_candidate_id:
                 repair_candidate_ids = {primary_source: primary_candidate_id}
             if fallback_source and fallback_candidate_id:
