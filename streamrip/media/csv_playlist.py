@@ -32,7 +32,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
+import re
 from dataclasses import dataclass
+from time import monotonic
 
 from rich.text import Text
 
@@ -68,6 +71,21 @@ _SEARCH_LIMIT = 8
 _REPAIR_SEARCH_LIMIT = 15
 _MIN_ACCEPTABLE_SCORE = 50
 _MIN_ACCEPTABLE_SCORE_REPAIR = 30
+_SHORTLIST_K = 3
+
+
+@dataclass(slots=True)
+class _ProviderBudget:
+    search_sem: asyncio.Semaphore
+    metadata_sem: asyncio.Semaphore
+    url_sem: asyncio.Semaphore
+    next_allowed_ts: float = 0.0
+    cooldown_until_ts: float = 0.0
+    failure_streak: int = 0
+    cooldown_count: int = 0
+    rate_limited_count: int = 0
+    auth_error_count: int = 0
+    disabled: bool = False
 
 
 def _session_country_hint() -> str:
@@ -173,7 +191,26 @@ def _item_isrc(source: str, item: dict) -> str:
     return (item.get("isrc") or "").strip()
 
 
-def _build_search_queries(row: ExportifyCsvRow, source: str) -> list[tuple[str, str]]:
+def _item_duration_ms(source: str, item: dict) -> int | None:
+    value = (
+        item.get("duration")
+        or item.get("duration_ms")
+        or item.get("durationMillis")
+        or item.get("duration_msec")
+    )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    # deezer/qobuz search duration tends to be seconds
+    if parsed < 10000:
+        parsed *= 1000
+    return parsed if parsed > 0 else None
+
+
+def _build_search_queries(
+    row: ExportifyCsvRow, source: str, *, escalation: bool = False
+) -> list[tuple[str, str]]:
     """Build deterministic layered queries for Exportify row resolution.
 
     Returns ``[(strategy, query), ...]`` in priority order:
@@ -184,7 +221,7 @@ def _build_search_queries(row: ExportifyCsvRow, source: str) -> list[tuple[str, 
     first_artist = row.artists_list[0] if row.artists_list else row.artists_raw
     artist_joined = " ".join(row.artists_list[:2]) if row.artists_list else first_artist
     year = row.release_date[:4].strip() if row.release_date else ""
-    stripped_title = strip_title_decorators(row.track_name)
+    stripped_title = row.canonical_track_name or strip_title_decorators(row.track_name)
 
     queries: list[tuple[str, str]] = []
     if row.isrc and source in {"deezer", "qobuz"}:
@@ -211,12 +248,19 @@ def _build_search_queries(row: ExportifyCsvRow, source: str) -> list[tuple[str, 
         if stripped_generic:
             queries.append(("stripped-generic", stripped_generic))
 
-    # De-dupe while preserving deterministic order.
+    if escalation and row.album:
+        queries.append(("album-priority", f"{row.track_name} {row.album}".strip()))
+    if escalation:
+        queries.append(("title-only", row.track_name))
+        if stripped_title and stripped_title != row.track_name:
+            queries.append(("stripped-title-only", stripped_title))
+
+    # De-dupe by normalized query text while preserving deterministic order.
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
     for strategy, query in queries:
         qn = " ".join(query.split())
-        key = f"{strategy}:{qn}"
+        key = qn.casefold()
         if qn and key not in seen:
             seen.add(key)
             out.append((strategy, qn))
@@ -247,7 +291,15 @@ def _pick_best_candidate(
         date = _item_date(source, item)
         isrc = _item_isrc(source, item)
 
-        sc = score_candidate(row, title, artist, album, date, isrc)
+        sc = score_candidate(
+            row,
+            title,
+            artist,
+            album,
+            date,
+            isrc,
+            _item_duration_ms(source, item),
+        )
         if sc > best_score:
             best_score = sc
             best_item = item
@@ -294,7 +346,15 @@ def _pick_best_candidate_repair(
         date = _item_date(source, item)
         isrc = _item_isrc(source, item)
 
-        sc = score_candidate_repair(row, title, artist, album, date, isrc)
+        sc = score_candidate_repair(
+            row,
+            title,
+            artist,
+            album,
+            date,
+            isrc,
+            _item_duration_ms(source, item),
+        )
         if sc > best_score:
             best_score = sc
             best_item = item
@@ -321,6 +381,55 @@ def _candidate_reason(candidate: TrackCandidate | None, min_score: int) -> str:
     if candidate.score < min_score:
         return f"low confidence ({candidate.score}<{min_score})"
     return "matched"
+
+
+def _pick_top_candidates(
+    row: ExportifyCsvRow,
+    source: str,
+    pages: list[dict],
+    client: Client,
+    *,
+    repair_mode: bool,
+    limit: int = _SHORTLIST_K,
+) -> list[TrackCandidate]:
+    items = _extract_raw_results(source, pages)
+    if not items:
+        return []
+    scored: list[TrackCandidate] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        item_id = str(item.get("id", "")).strip()
+        if not item_id or item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        title = _item_title(source, item)
+        artist = _item_artist(source, item)
+        album = _item_album(source, item)
+        date = _item_date(source, item)
+        isrc = _item_isrc(source, item)
+        duration_ms = _item_duration_ms(source, item)
+        score = (
+            score_candidate_repair(row, title, artist, album, date, isrc, duration_ms)
+            if repair_mode
+            else score_candidate(row, title, artist, album, date, isrc, duration_ms)
+        )
+        if score <= 0:
+            continue
+        scored.append(
+            TrackCandidate(
+                source=source,
+                id=item_id,
+                title=title,
+                artist=artist,
+                album=album,
+                release_date=date,
+                isrc=isrc,
+                score=score,
+                client=client,
+            )
+        )
+    scored.sort(key=lambda c: c.score, reverse=True)
+    return scored[:limit]
 
 
 def _build_extra_tags(
@@ -428,6 +537,36 @@ class PendingCsvTrack(Pending):
     playlist_name: str
     position: int
     db: Database
+    provider_budgets: dict[str, _ProviderBudget] | None = None
+    negative_candidate_cache: dict[tuple[str, str], str] | None = None
+
+    async def _provider_wait(self, source: str) -> None:
+        if self.provider_budgets is None:
+            return
+        budget = self.provider_budgets.get(source)
+        if budget is None:
+            return
+        wait_for = max(budget.cooldown_until_ts, budget.next_allowed_ts) - monotonic()
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+
+    def _provider_after_call(
+        self, source: str, ok: bool, err: Exception | None
+    ) -> None:
+        if self.provider_budgets is None:
+            return
+        budget = self.provider_budgets.get(source)
+        if budget is None:
+            return
+        csv_cfg = getattr(self.config.session, "csv_resolver", None)
+        min_interval = float(
+            getattr(csv_cfg, "provider_min_interval_seconds", 0.2) or 0
+        )
+        budget.next_allowed_ts = max(budget.next_allowed_ts, monotonic()) + min_interval
+        if ok:
+            budget.failure_streak = 0
+            return
+        budget.failure_streak += 1
 
     async def resolve(self) -> Track | None:
         """Attempt to download the track using service-first / quality-second logic.
@@ -569,6 +708,9 @@ class PendingCsvTrack(Pending):
                 ),
                 reason=reason,
                 row_index=self.row.row_index,
+                source_row_index=self.row.source_row_index,
+                original_position=self.row.position,
+                duration_ms=self.row.duration_ms,
                 session_country=_session_country_hint(),
                 attempt_trace=" | ".join(
                     f"{a.source}@{a.quality}:{a.status}" for a in attempts
@@ -643,23 +785,48 @@ class PendingCsvTrack(Pending):
             self.db.set_skipped()
             return _MetaFetchResult(status="duplicate-race")
 
+        cache_key = (candidate.source, candidate.id)
+        if self.negative_candidate_cache is not None:
+            cached_status = self.negative_candidate_cache.get(cache_key)
+            if cached_status in {
+                "matched unavailable",
+                "provider-error",
+                "metadata-error",
+            }:
+                return _MetaFetchResult(status=cached_status)
+
         try:
-            resp = await candidate.client.get_metadata(candidate.id, "track")
+            if (
+                self.provider_budgets is not None
+                and candidate.source in self.provider_budgets
+            ):
+                async with self.provider_budgets[candidate.source].metadata_sem:
+                    await self._provider_wait(candidate.source)
+                    resp = await candidate.client.get_metadata(candidate.id, "track")
+            else:
+                resp = await candidate.client.get_metadata(candidate.id, "track")
+            self._provider_after_call(candidate.source, ok=True, err=None)
         except NonStreamableError as e:
+            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Could not fetch metadata for %s:%s: %s",
                 candidate.source,
                 candidate.id,
                 e,
             )
+            if self.negative_candidate_cache is not None:
+                self.negative_candidate_cache[cache_key] = "matched unavailable"
             return _MetaFetchResult(status="matched unavailable")
         except Exception as e:
+            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Unexpected error fetching metadata for %s:%s: %s",
                 candidate.source,
                 candidate.id,
                 e,
             )
+            if self.negative_candidate_cache is not None:
+                self.negative_candidate_cache[cache_key] = "provider-error"
             return _MetaFetchResult(status="provider-error")
 
         album = AlbumMetadata.from_track_resp(resp, candidate.source)
@@ -670,6 +837,8 @@ class PendingCsvTrack(Pending):
                 candidate.id,
                 candidate.source,
             )
+            if self.negative_candidate_cache is not None:
+                self.negative_candidate_cache[cache_key] = "matched unavailable"
             return _MetaFetchResult(status="matched unavailable")
 
         meta = TrackMetadata.from_resp(album, candidate.source, resp)
@@ -679,6 +848,8 @@ class PendingCsvTrack(Pending):
                 candidate.source,
                 candidate.id,
             )
+            if self.negative_candidate_cache is not None:
+                self.negative_candidate_cache[cache_key] = "metadata-error"
             return _MetaFetchResult(status="metadata-error")
 
         c = self.config.session.metadata
@@ -726,21 +897,46 @@ class PendingCsvTrack(Pending):
         """
         # Attempt download at the requested quality.
         # Pass exact_quality=True for Deezer so the caller controls stepping.
-        is_deezer = candidate.source == "deezer"
         try:
-            if is_deezer:
-                embedded_cover_path, downloadable = await asyncio.gather(
-                    self._download_cover(cached.album.covers, candidate.client),
-                    candidate.client.get_downloadable(
+
+            async def _get_downloadable():
+                if (
+                    self.provider_budgets is not None
+                    and candidate.source in self.provider_budgets
+                ):
+                    async with self.provider_budgets[candidate.source].url_sem:
+                        await self._provider_wait(candidate.source)
+                        if candidate.source == "deezer":
+                            return await candidate.client.get_downloadable(
+                                candidate.id, quality, exact_quality=True
+                            )
+                        return await candidate.client.get_downloadable(
+                            candidate.id, quality
+                        )
+                if candidate.source == "deezer":
+                    return await candidate.client.get_downloadable(
                         candidate.id, quality, exact_quality=True
-                    ),
+                    )
+                return await candidate.client.get_downloadable(candidate.id, quality)
+
+            embedded_cover_path, downloadable = await asyncio.gather(
+                self._download_cover(cached.album.covers, candidate.client),
+                _get_downloadable(),
+                return_exceptions=True,
+            )
+            if isinstance(downloadable, Exception):
+                raise downloadable
+            if isinstance(embedded_cover_path, Exception):
+                logger.warning(
+                    "Could not download cover for %s:%s: %s",
+                    candidate.source,
+                    candidate.id,
+                    embedded_cover_path,
                 )
-            else:
-                embedded_cover_path, downloadable = await asyncio.gather(
-                    self._download_cover(cached.album.covers, candidate.client),
-                    candidate.client.get_downloadable(candidate.id, quality),
-                )
+                embedded_cover_path = None
+            self._provider_after_call(candidate.source, ok=True, err=None)
         except NonStreamableError as e:
+            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Quality %d not available for %s:%s: %s",
                 quality,
@@ -750,6 +946,7 @@ class PendingCsvTrack(Pending):
             )
             return None, "quality unavailable"
         except Exception as e:
+            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Error getting downloadable for %s:%s: %s",
                 candidate.source,
@@ -766,6 +963,7 @@ class PendingCsvTrack(Pending):
                 self.folder,
                 embedded_cover_path,
                 self.db,
+                expected_duration_ms=self.row.duration_ms,
             ),
             "ok",
         )
@@ -802,6 +1000,9 @@ class PendingCsvPlaylist(Pending):
     config: Config
     db: Database
     repair_mode: bool = False
+    query_cache: dict[tuple[str, str, int], list[dict]] | None = None
+    provider_budgets: dict[str, _ProviderBudget] | None = None
+    negative_candidate_cache: dict[tuple[str, str], str] | None = None
 
     @dataclass(slots=True)
     class Status:
@@ -826,7 +1027,117 @@ class PendingCsvPlaylist(Pending):
     class FailFastAbortError(RuntimeError):
         """Raised when fail-fast mode aborts CSV row resolution for a batch."""
 
+    def _csv_cfg(self):
+        return getattr(self.config.session, "csv_resolver", None)
+
+    def _init_provider_budgets(self) -> None:
+        csv_cfg = self._csv_cfg()
+
+        def _coerce_int(value, default: int) -> int:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _int_cfg(name: str, default: int) -> int:
+            val = _coerce_int(getattr(csv_cfg, name, default), default)
+            return max(1, val)
+
+        search_limit = _int_cfg("search_inflight_per_provider", 3)
+        metadata_limit = _int_cfg("metadata_inflight_per_provider", 2)
+        url_limit = _int_cfg("url_inflight_per_provider", 2)
+        self.provider_budgets = {
+            src: _ProviderBudget(
+                search_sem=asyncio.Semaphore(search_limit),
+                metadata_sem=asyncio.Semaphore(metadata_limit),
+                url_sem=asyncio.Semaphore(url_limit),
+            )
+            for src in {
+                self.primary_client.source,
+                self.fallback_client.source if self.fallback_client is not None else "",
+            }
+            if src
+        }
+
+    async def _provider_wait(self, source: str) -> None:
+        if self.provider_budgets is None:
+            return
+        budget = self.provider_budgets[source]
+        now = monotonic()
+        wait_for = max(budget.cooldown_until_ts, budget.next_allowed_ts) - now
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+
+    def _provider_after_call(
+        self, source: str, ok: bool, err: Exception | None
+    ) -> None:
+        if self.provider_budgets is None:
+            return
+        budget = self.provider_budgets[source]
+        csv_cfg = self._csv_cfg()
+
+        def _coerce_float(value, default: float) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _coerce_int(value, default: int) -> int:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        min_interval = max(
+            0.0,
+            _coerce_float(getattr(csv_cfg, "provider_min_interval_seconds", 0.2), 0.2),
+        )
+        budget.next_allowed_ts = max(budget.next_allowed_ts, monotonic()) + min_interval
+        if ok:
+            budget.failure_streak = 0
+            return
+        budget.failure_streak += 1
+        msg = str(err).lower() if err is not None else ""
+        if "429" in msg or "too many" in msg:
+            budget.rate_limited_count += 1
+        if (
+            "401" in msg
+            or "unauthorized" in msg
+            or re.search(r"\bauth(?:entication)?\b", msg, re.IGNORECASE)
+        ):
+            budget.auth_error_count += 1
+            if budget.auth_error_count >= 3:
+                budget.disabled = True
+        threshold = _coerce_int(getattr(csv_cfg, "failure_streak_for_cooldown", 4), 4)
+        if threshold <= 0:
+            return
+        if budget.failure_streak < threshold:
+            return
+        base = max(
+            0.0, _coerce_float(getattr(csv_cfg, "cooldown_base_seconds", 10.0), 10.0)
+        )
+        cap = max(
+            0.0, _coerce_float(getattr(csv_cfg, "cooldown_max_seconds", 120.0), 120.0)
+        )
+        cooldown = min(cap, base * (2 ** max(budget.cooldown_count, 0)))
+        cooldown += random.uniform(0.0, 1.0)
+        budget.cooldown_until_ts = monotonic() + cooldown
+        budget.cooldown_count += 1
+        budget.failure_streak = 0
+
     async def resolve(self) -> Playlist | None:
+        if self.query_cache is None:
+            self.query_cache = {}
+        if self.negative_candidate_cache is None:
+            self.negative_candidate_cache = {}
+        if self.provider_budgets is None:
+            self._init_provider_budgets()
         parent = self.config.session.downloads.folder
         folder = os.path.join(parent, clean_filepath(self.playlist_name))
 
@@ -945,10 +1256,20 @@ class PendingCsvPlaylist(Pending):
         - Uses :func:`_pick_best_candidate_repair` which applies fuzzy title
           matching as a fallback when exact title matching fails.
         """
-        search_limit = _REPAIR_SEARCH_LIMIT if self.repair_mode else _SEARCH_LIMIT
-        picker = (
-            _pick_best_candidate_repair if self.repair_mode else _pick_best_candidate
+        csv_cfg = self._csv_cfg()
+        escalation_value = getattr(
+            csv_cfg, "escalation_search_limit", _REPAIR_SEARCH_LIMIT
         )
+        if isinstance(escalation_value, bool) or not isinstance(
+            escalation_value, (int, float, str)
+        ):
+            escalation_limit = _REPAIR_SEARCH_LIMIT
+        else:
+            try:
+                escalation_limit = int(escalation_value or _REPAIR_SEARCH_LIMIT)
+            except (TypeError, ValueError):
+                escalation_limit = _REPAIR_SEARCH_LIMIT
+        search_limit = _REPAIR_SEARCH_LIMIT if self.repair_mode else _SEARCH_LIMIT
         min_score = (
             _MIN_ACCEPTABLE_SCORE_REPAIR if self.repair_mode else _MIN_ACCEPTABLE_SCORE
         )
@@ -974,13 +1295,20 @@ class PendingCsvPlaylist(Pending):
                     else "",
                     reason=reason,
                     row_index=row.row_index,
+                    source_row_index=row.source_row_index,
+                    original_position=row.position,
+                    duration_ms=row.duration_ms,
                     session_country=_session_country_hint(),
                 )
             if callback:
                 await callback()
             return None
 
-        async def _resolve_for_client(client: Client) -> ResolverOutcome:
+        async def _resolve_for_client(
+            client: Client,
+            *,
+            escalation: bool = False,
+        ) -> ResolverOutcome:
             """
             Resolve the best TrackCandidate for a single client by optionally using an ID hint and then running layered search queries.
 
@@ -993,7 +1321,17 @@ class PendingCsvPlaylist(Pending):
                   - query: the query string that produced the returned candidate (or the last attempted query on failure),
                   - strategy: the query strategy that produced the returned candidate (or the last attempted strategy on failure).
             """
-            queries = _build_search_queries(row, client.source)
+            queries = _build_search_queries(row, client.source, escalation=escalation)
+            if (
+                self.provider_budgets is not None
+                and self.provider_budgets[client.source].disabled
+            ):
+                return ResolverOutcome(
+                    candidate=None,
+                    reason="provider disabled (auth/session failure)",
+                    query="",
+                    strategy="provider-disabled",
+                )
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
             had_error = False
             last_query = ""
@@ -1003,7 +1341,7 @@ class PendingCsvPlaylist(Pending):
             if self.repair_mode and row.repair_candidate_ids:
                 hinted_id = (row.repair_candidate_ids.get(client.source) or "").strip()
 
-            if hinted_id:
+            if hinted_id and not escalation:
                 try:
                     hinted_resp = await client.get_metadata(hinted_id, "track")
                     hinted_candidate = TrackCandidate(
@@ -1022,6 +1360,7 @@ class PendingCsvPlaylist(Pending):
                                 _item_album(client.source, hinted_resp),
                                 _item_date(client.source, hinted_resp),
                                 _item_isrc(client.source, hinted_resp),
+                                _item_duration_ms(client.source, hinted_resp),
                             )
                             if self.repair_mode
                             else score_candidate(
@@ -1031,6 +1370,7 @@ class PendingCsvPlaylist(Pending):
                                 _item_album(client.source, hinted_resp),
                                 _item_date(client.source, hinted_resp),
                                 _item_isrc(client.source, hinted_resp),
+                                _item_duration_ms(client.source, hinted_resp),
                             )
                         ),
                         client=client,
@@ -1053,12 +1393,47 @@ class PendingCsvPlaylist(Pending):
                     )
 
             for strategy, query in queries:
+                if (
+                    self.provider_budgets is not None
+                    and self.provider_budgets[client.source].disabled
+                ):
+                    break
                 last_query = query
                 last_strategy = strategy
                 try:
-                    pages = await client.search("track", query, limit=search_limit)
-                    candidate = picker(row, client.source, pages, client)
+                    effective_limit = escalation_limit if escalation else search_limit
+                    cache_key = (client.source, query.casefold(), effective_limit)
+                    if self.query_cache is not None and cache_key in self.query_cache:
+                        pages = self.query_cache[cache_key]
+                    else:
+                        if self.provider_budgets is not None:
+                            async with self.provider_budgets[client.source].search_sem:
+                                await self._provider_wait(client.source)
+                                pages = await client.search(
+                                    "track", query, limit=effective_limit
+                                )
+                        else:
+                            pages = await client.search(
+                                "track", query, limit=effective_limit
+                            )
+                        self._provider_after_call(client.source, ok=True, err=None)
+                        if self.query_cache is not None:
+                            self.query_cache[cache_key] = pages
+                    top_candidates = _pick_top_candidates(
+                        row,
+                        client.source,
+                        pages,
+                        client,
+                        repair_mode=self.repair_mode,
+                        limit=_SHORTLIST_K,
+                    )
                 except Exception as e:
+                    self._provider_after_call(client.source, ok=False, err=e)
+                    if (
+                        self.provider_budgets is not None
+                        and self.provider_budgets[client.source].disabled
+                    ):
+                        break
                     had_error = True
                     logger.debug(
                         "Search failed on %s (%s) for '%s': %s",
@@ -1069,10 +1444,10 @@ class PendingCsvPlaylist(Pending):
                     )
                     continue
 
-                reason = _candidate_reason(candidate, min_score)
-                if reason == "matched":
-                    return ResolverOutcome(candidate, reason, query, strategy)
-                if candidate is not None:
+                for candidate in top_candidates:
+                    reason = _candidate_reason(candidate, min_score)
+                    if reason == "matched":
+                        return ResolverOutcome(candidate, reason, query, strategy)
                     if (
                         best_low_conf is None
                         or candidate.score > best_low_conf[2].score
@@ -1101,14 +1476,39 @@ class PendingCsvPlaylist(Pending):
                 strategy=queries[-1][0] if queries else "",
             )
 
-        primary_outcome = await _resolve_for_client(self.primary_client)
+        primary_outcome = await _resolve_for_client(
+            self.primary_client, escalation=False
+        )
 
         # Search fallback service if configured
         if self.fallback_client is not None and not (
             primary_outcome.candidate is not None
             and primary_outcome.candidate.score >= min_score
         ):
-            fallback_outcome = await _resolve_for_client(self.fallback_client)
+            fallback_outcome = await _resolve_for_client(
+                self.fallback_client, escalation=False
+            )
+        if (
+            primary_outcome.candidate is None
+            or primary_outcome.candidate.score < min_score
+        ):
+            primary_outcome = await _resolve_for_client(
+                self.primary_client, escalation=True
+            )
+        if (
+            self.fallback_client is not None
+            and (
+                fallback_outcome.candidate is None
+                or fallback_outcome.candidate.score < min_score
+            )
+            and (
+                primary_outcome.candidate is None
+                or primary_outcome.candidate.score < min_score
+            )
+        ):
+            fallback_outcome = await _resolve_for_client(
+                self.fallback_client, escalation=True
+            )
 
         primary_candidate = (
             primary_outcome.candidate
@@ -1155,6 +1555,9 @@ class PendingCsvPlaylist(Pending):
                     else "",
                     reason=failure_reasons or "metadata mismatch",
                     row_index=row.row_index,
+                    source_row_index=row.source_row_index,
+                    original_position=row.position,
+                    duration_ms=row.duration_ms,
                     primary_candidate_id=(
                         primary_outcome.candidate.id
                         if primary_outcome.candidate is not None
@@ -1196,6 +1599,8 @@ class PendingCsvPlaylist(Pending):
             playlist_name=self.playlist_name,
             position=row.position,
             db=self.db,
+            provider_budgets=self.provider_budgets,
+            negative_candidate_cache=self.negative_candidate_cache,
         )
 
 

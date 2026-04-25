@@ -120,7 +120,11 @@ class DeezerDownloadable(Downloadable):
     is_encrypted = re.compile("/m(?:obile|edia)/")
 
     def __init__(self, session: aiohttp.ClientSession, info: dict):
-        logger.debug("Deezer info for downloadable: %s", info)
+        logger.debug(
+            "Initializing Deezer downloadable (id=%s, requested_quality=%s)",
+            info.get("id"),
+            info.get("quality"),
+        )
         self.session = session
         self.url = info["url"]
         self.source: str = "deezer"
@@ -158,17 +162,15 @@ class DeezerDownloadable(Downloadable):
                     raise NonStreamableError("File not found.")
 
             if self.is_encrypted.search(self.url) is None:
-                logger.debug(f"Deezer file at {self.url} not encrypted.")
+                logger.debug("Deezer file for id=%s is not encrypted.", self.id)
                 await fast_async_download(
                     path, self.url, self.session.headers, callback
                 )
             else:
                 blowfish_key = self._generate_blowfish_key(self.id)
                 logger.debug(
-                    "Deezer file (id %s) at %s is encrypted. Decrypting with %s",
+                    "Deezer file id=%s is encrypted. Decrypting stream chunks.",
                     self.id,
-                    self.url,
-                    blowfish_key,
                 )
 
                 buf = bytearray()

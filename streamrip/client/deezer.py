@@ -228,7 +228,11 @@ class DeezerClient(Client):
 
         token = track_info["TRACK_TOKEN"]
         try:
-            logger.debug("Fetching deezer url with token %s", token)
+            logger.debug(
+                "Fetching Deezer URL for track %s at requested format %s",
+                item_id,
+                format_str,
+            )
             url = await asyncio.to_thread(self.client.get_track_url, token, format_str)
         except deezer.WrongLicense:
             raise NonStreamableError(
@@ -256,7 +260,12 @@ class DeezerClient(Client):
             )
 
         dl_info["url"] = url
-        logger.debug("dz track info: %s", track_info)
+        logger.debug(
+            "Prepared Deezer downloadable for track %s (quality=%s, available=%s)",
+            item_id,
+            quality,
+            [i for i, size in enumerate(size_map) if size > 0],
+        )
         return DeezerDownloadable(self.session, dl_info)
 
     def _get_encrypted_file_url(
@@ -265,7 +274,9 @@ class DeezerClient(Client):
         track_hash: str,
         media_version: str,
     ):
-        logger.debug("Unable to fetch URL. Trying encryption method.")
+        logger.debug(
+            "Unable to fetch Deezer media URL. Falling back to encrypted CDN path."
+        )
         format_number = 1
 
         url_bytes = b"\xa4".join(
@@ -289,5 +300,5 @@ class DeezerClient(Client):
             AES.new(b"jo6aey6haid2Teih", AES.MODE_ECB).encrypt(info_bytes),
         ).decode("utf-8")
         url = f"https://e-cdns-proxy-{track_hash[0]}.dzcdn.net/mobile/1/{path}"
-        logger.debug("Encrypted file path %s", url)
+        logger.debug("Constructed encrypted Deezer CDN path for track %s", meta_id)
         return url

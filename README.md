@@ -270,6 +270,9 @@ For each CSV row, streamrip:
 
 **Rerunning is safe** — tracks already in the download database or on disk are skipped automatically.
 
+**Release note:** Exportify CSV imports no longer rewrite the source CSV or create a
+`*.original.csv` backup file; batching/sorting is now handled in memory.
+
 **Unresolved tracks** (no match found on any service) are logged to a CSV file next to
 the input file (e.g. `Liked_Songs_unresolved.csv`) for audit. These are separate from
 provider-backed download failures tracked by `rip repair`.

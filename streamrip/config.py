@@ -124,6 +124,26 @@ class ReliabilityConfig:
 
 
 @dataclass(slots=True)
+class CsvResolverConfig:
+    # Max in-flight search calls per provider during CSV resolution
+    search_inflight_per_provider: int
+    # Max in-flight metadata calls per provider during CSV resolution
+    metadata_inflight_per_provider: int
+    # Max in-flight URL acquisition calls per provider during CSV download attempts
+    url_inflight_per_provider: int
+    # Minimum delay between provider API calls (seconds)
+    provider_min_interval_seconds: float
+    # Base cooldown window (seconds) when provider pressure/errors rise
+    cooldown_base_seconds: float
+    # Max cooldown cap (seconds)
+    cooldown_max_seconds: float
+    # Consecutive failures before opening cooldown/circuit
+    failure_streak_for_cooldown: int
+    # Extra search limit used by escalation lane
+    escalation_search_limit: int
+
+
+@dataclass(slots=True)
 class ConversionConfig:
     enabled: bool
     # FLAC, ALAC, OPUS, MP3, VORBIS, or AAC
@@ -288,6 +308,7 @@ class ConfigData:
     database: DatabaseConfig
     reliability: ReliabilityConfig
     conversion: ConversionConfig
+    csv_resolver: CsvResolverConfig
 
     misc: MiscConfig
 
@@ -349,6 +370,12 @@ class ConfigData:
             "conversion",
             ConversionConfig,
         )
+        csv_resolver = _build_dataclass_config(
+            toml,
+            default_toml,
+            "csv_resolver",
+            CsvResolverConfig,
+        )
         misc = _build_dataclass_config(toml, default_toml, "misc", MiscConfig)
 
         return cls(
@@ -368,6 +395,7 @@ class ConfigData:
             database=database,
             reliability=reliability,
             conversion=conversion,
+            csv_resolver=csv_resolver,
             misc=misc,
         )
 
@@ -398,6 +426,7 @@ class ConfigData:
         update_toml_section_from_config(self.toml["cli"], self.cli)
         update_toml_section_from_config(self.toml["database"], self.database)
         update_toml_section_from_config(self.toml["reliability"], self.reliability)
+        update_toml_section_from_config(self.toml["csv_resolver"], self.csv_resolver)
         update_toml_section_from_config(self.toml["conversion"], self.conversion)
 
     def get_source(
@@ -417,8 +446,8 @@ class ConfigData:
 
 
 def update_toml_section_from_config(toml_section, config):
-    for field in fields(config):
-        toml_section[field.name] = getattr(config, field.name)
+    for config_field in fields(config):
+        toml_section[config_field.name] = getattr(config, config_field.name)
 
 
 def _build_dataclass_config(
@@ -434,11 +463,11 @@ def _build_dataclass_config(
     user_section = user_toml[section]
     default_section = default_toml[section]
     data = {}
-    for field in fields(config_cls):
-        if field.name in user_section:
-            data[field.name] = user_section[field.name]
+    for config_field in fields(config_cls):
+        if config_field.name in user_section:
+            data[config_field.name] = user_section[config_field.name]
         else:
-            data[field.name] = copy.deepcopy(default_section[field.name])
+            data[config_field.name] = copy.deepcopy(default_section[config_field.name])
     return config_cls(**data)
 
 

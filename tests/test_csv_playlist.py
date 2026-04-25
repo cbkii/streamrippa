@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -63,7 +64,9 @@ class _MemoryDb:
         self._data: set[str] = set()
 
     def add(self, item):
+        before = len(self._data)
         self._data.add(item[0])
+        return len(self._data) > before
 
     def contains(self, **kwargs) -> bool:
         return kwargs.get("id", "") in self._data
@@ -228,6 +231,13 @@ def test_build_search_queries_adds_stripped_title_variant_for_decorated_rows():
     assert any("1, 2 Step Ciara" in query for _, query in queries)
 
 
+def test_build_search_queries_dedupes_identical_normalized_queries():
+    row = _make_row(title="Song", artists=["Artist"])
+    queries = _build_search_queries(row, "qobuz", escalation=True)
+    query_texts = [q.casefold() for _, q in queries]
+    assert len(query_texts) == len(set(query_texts))
+
+
 # ---------------------------------------------------------------------------
 # _pick_best_candidate
 # ---------------------------------------------------------------------------
@@ -291,6 +301,41 @@ def test_pick_best_candidate_title_artist_match():
     cand = _pick_best_candidate(row, "qobuz", pages, client)
     assert cand is not None
     assert cand.score >= 60
+
+
+def test_pick_best_candidate_prefers_duration_match():
+    row = _make_row(title="Layla", artists=["Eric Clapton"])
+    row.duration_ms = 290000
+    client = _make_client("qobuz")
+    pages = [
+        {
+            "tracks": {
+                "items": [
+                    {
+                        "id": 1,
+                        "title": "Layla",
+                        "performer": {"name": "Eric Clapton"},
+                        "album": {"title": "Unplugged"},
+                        "isrc": "",
+                        "release_date_original": "1992",
+                        "duration": 290,
+                    },
+                    {
+                        "id": 2,
+                        "title": "Layla",
+                        "performer": {"name": "Eric Clapton"},
+                        "album": {"title": "Unplugged"},
+                        "isrc": "",
+                        "release_date_original": "1992",
+                        "duration": 360,
+                    },
+                ]
+            }
+        }
+    ]
+    cand = _pick_best_candidate(row, "qobuz", pages, client)
+    assert cand is not None
+    assert cand.id == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +702,80 @@ async def test_pending_csv_track_skips_if_fallback_already_downloaded():
 
 
 @pytest.mark.asyncio
+async def test_try_candidate_with_meta_cover_failure_is_best_effort():
+    """Cover-download errors must not fail an otherwise valid downloadable."""
+    db = _make_db()
+    cfg = _make_config()
+    client = _make_client("qobuz")
+    client.get_downloadable = AsyncMock(return_value=MagicMock())
+    candidate = _make_candidate("qobuz", client, id="qobuz_id")
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=candidate,
+        fallback_candidate=None,
+        primary_qualities=[2],
+        fallback_qualities=[],
+        primary_source="qobuz",
+        fallback_source="",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+    cached = _CandidateMeta(
+        resp={},
+        album=MagicMock(covers=MagicMock()),
+        meta=MagicMock(),
+    )
+
+    with patch.object(
+        PendingCsvTrack,
+        "_download_cover",
+        new=AsyncMock(side_effect=RuntimeError("cover timeout")),
+    ):
+        resolved_track, status = await track._try_candidate_with_meta(
+            candidate, cached, quality=2
+        )
+
+    assert status == "ok"
+    assert resolved_track is not None
+
+
+def test_provider_budget_config_clamps_and_disables_cooldown_with_zero_threshold():
+    cfg = _make_config()
+    cfg.session.csv_resolver = SimpleNamespace(
+        search_inflight_per_provider=0,
+        metadata_inflight_per_provider=0,
+        url_inflight_per_provider=0,
+        provider_min_interval_seconds=-1,
+        cooldown_base_seconds=0,
+        cooldown_max_seconds=0,
+        failure_streak_for_cooldown=0,
+    )
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[_make_row()],
+        primary_client=_make_client("qobuz"),
+        fallback_client=None,
+        config=cfg,
+        db=_make_db(),
+    )
+    pending._init_provider_budgets()
+    assert pending.provider_budgets is not None
+    budget = pending.provider_budgets["qobuz"]
+    assert budget.search_sem._value == 1
+    assert budget.metadata_sem._value == 1
+    assert budget.url_sem._value == 1
+
+    pending._provider_after_call("qobuz", ok=False, err=Exception("timeout"))
+    # threshold=0 disables cooldown opening; failure streak remains accumulated.
+    assert budget.cooldown_count == 0
+    assert budget.cooldown_until_ts == 0.0
+    assert budget.failure_streak == 1
+
+
+@pytest.mark.asyncio
 async def test_pending_csv_playlist_fail_fast_stops_after_batch_error():
     """With fail_fast=True, a batch-level exception stops further batch processing.
 
@@ -757,6 +876,68 @@ async def test_pending_csv_playlist_batches_resolver():
 
     finally:
         csv_mod._RESOLVER_BATCH_SIZE = original_batch_size
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_query_cache_avoids_duplicate_search_calls():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(return_value=[])
+
+    rows = [
+        _make_row(title="Song", artists=["Artist"], row_index=0),
+        _make_row(title="Song", artists=["Artist"], row_index=1),
+    ]
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=rows,
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    pending.query_cache = {}
+    await pending._resolve_row(
+        rows[0],
+        "/tmp",
+        [3, 2, 1, 0],
+        [],
+        pending.Status(0, 0, 0, len(rows)),
+        callback=None,
+    )
+    count_after_first_row = primary_client.search.await_count
+    await pending._resolve_row(
+        rows[1],
+        "/tmp",
+        [3, 2, 1, 0],
+        [],
+        pending.Status(0, 0, 0, len(rows)),
+        callback=None,
+    )
+    assert primary_client.search.await_count == count_after_first_row
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_disables_provider_after_repeated_auth_errors():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(side_effect=Exception("401 unauthorized"))
+
+    rows = [_make_row(row_index=i) for i in range(6)]
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=rows,
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    await pending.resolve()
+    assert pending.provider_budgets is not None
+    assert pending.provider_budgets["qobuz"].disabled is True
 
 
 @pytest.mark.asyncio
@@ -1431,7 +1612,7 @@ async def test_repair_mode_falls_back_to_search_when_candidate_id_hint_fails():
 
 @pytest.mark.asyncio
 async def test_normal_mode_uses_standard_search_limit():
-    """In normal mode (repair_mode=False), the standard _SEARCH_LIMIT is used."""
+    """Normal mode uses _SEARCH_LIMIT initially and escalation_search_limit when escalated."""
     import streamrip.media.csv_playlist as csv_mod
 
     db = _make_db()
@@ -1461,7 +1642,8 @@ async def test_normal_mode_uses_standard_search_limit():
     await pending.resolve()
 
     assert search_limits
-    assert all(lim == csv_mod._SEARCH_LIMIT for lim in search_limits)
+    assert csv_mod._SEARCH_LIMIT in search_limits
+    assert any(lim > csv_mod._SEARCH_LIMIT for lim in search_limits)
 
 
 # ---------------------------------------------------------------------------

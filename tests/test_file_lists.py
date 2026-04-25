@@ -12,7 +12,6 @@ from streamrip.file_lists import (
     _artist_overlap,
     _normalise,
     _normalise_variant_text,
-    backup_and_sort_exportify_csv,
     detect_file_mode,
     exportify_artist_group_key,
     is_usable_exportify_row,
@@ -115,6 +114,9 @@ def test_parse_basic_row():
         assert row.tempo == "120.3"
         assert row.position == 1
         assert row.row_index == 0
+        assert row.source_row_index == 0
+        assert row.duration_ms == 337800
+        assert row.canonical_track_name == "Blue in Green"
     finally:
         os.unlink(path)
 
@@ -233,7 +235,7 @@ def test_parse_isrc_track_isrc_fallback():
         os.unlink(path)
 
 
-def test_backup_and_sort_exportify_csv_creates_backup_and_sorts_rows():
+def test_parse_exportify_csv_does_not_create_backup_file():
     content = _make_csv(
         [
             '"spotify:track:2","Track B","Album","Zulu","2020","","","","","","","","","","2"',
@@ -242,43 +244,34 @@ def test_backup_and_sort_exportify_csv_creates_backup_and_sorts_rows():
     )
     path = _write_tmp_csv(content)
     try:
-        backup_path = backup_and_sort_exportify_csv(path)
-        assert Path(backup_path).exists()
-
-        with open(backup_path, encoding="utf-8-sig") as fh:
-            backup_text = fh.read()
-        assert "Track B" in backup_text and "Track A" in backup_text
-
         _, rows = parse_exportify_csv(path)
-        assert [r.artists_raw for r in rows] == ["Alpha", "Zulu"]
+        assert [r.artists_raw for r in rows] == ["Zulu", "Alpha"]
+        backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
+        assert not backup.exists()
     finally:
         os.unlink(path)
-        backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
-        if backup.exists():
-            backup.unlink()
 
 
-def test_backup_and_sort_exportify_csv_reuses_existing_backup():
+def test_partition_exportify_rows_artist_batched_orders_in_memory():
     content = _make_csv(
         [
-            '"spotify:track:1","Track A","Album","Bravo","2020","","","","","","","","","","1"'
+            '"spotify:track:2","Track B","Album","Zulu","2020","","","","","","","","","","2"',
+            '"spotify:track:1","Track A","Album","Alpha","2020","","","","","","","","","","1"',
+            '"spotify:track:3","Track C","Album","Alpha","2020","","","","","","","","","","3"',
         ]
     )
     path = _write_tmp_csv(content)
-    backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
-    backup.write_text("sentinel", encoding="utf-8")
     try:
-        backup_path = backup_and_sort_exportify_csv(path)
-        assert backup_path == str(backup)
-        assert backup.read_text(encoding="utf-8") == "sentinel"
+        _, rows = parse_exportify_csv(path)
+        batches = partition_exportify_rows_artist_batched(rows, max_batch_size=10)
+        ordered_artists = [row.artists_raw for batch in batches for row in batch]
+        assert ordered_artists == ["Alpha", "Alpha", "Zulu"]
     finally:
         os.unlink(path)
-        if backup.exists():
-            backup.unlink()
 
 
-def test_backup_and_sort_exportify_csv_ignores_extra_fields_on_write():
-    # Malformed row has one extra comma-delimited field at the end.
+def test_parse_exportify_csv_ignores_extra_fields():
+    # Malformed row has one extra comma-delimited field at the end; parser should still read it.
     content = _make_csv(
         [
             '"spotify:track:2","Track B","Album","Zulu","2020","","","","","","","","","","2",EXTRA',
@@ -287,15 +280,10 @@ def test_backup_and_sort_exportify_csv_ignores_extra_fields_on_write():
     )
     path = _write_tmp_csv(content)
     try:
-        backup_path = backup_and_sort_exportify_csv(path)
-        assert Path(backup_path).exists()
         _, rows = parse_exportify_csv(path)
-        assert [r.artists_raw for r in rows] == ["Alpha", "Zulu"]
+        assert [r.artists_raw for r in rows] == ["Zulu", "Alpha"]
     finally:
         os.unlink(path)
-        backup = Path(path).with_name(f"{Path(path).stem}.original{Path(path).suffix}")
-        if backup.exists():
-            backup.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +390,14 @@ def test_strip_title_decorators_removes_feat_and_remaster_suffixes():
     assert strip_title_decorators("1, 2 Step (feat. Missy Elliott)") == "1, 2 Step"
     assert strip_title_decorators("Song Name - 2011 Remaster") == "Song Name"
     assert strip_title_decorators("Song Name \u2013 2011 Remaster") == "Song Name"
+    assert (
+        strip_title_decorators("Layla - Acoustic; Live at MTV Unplugged; 2013 Remaster")
+        == "Layla"
+    )
+    assert (
+        strip_title_decorators("Bug Powder Dust - Kruder & Dorfmeister Session")
+        == "Bug Powder Dust - Kruder & Dorfmeister Session"
+    )
 
 
 def test_score_featured_title_matches_plain_canonical_title():
