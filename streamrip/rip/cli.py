@@ -24,6 +24,40 @@ from ..utils.ssl_utils import get_aiohttp_connector_kwargs
 from .main import Main
 
 
+def _effective_csv_sources(
+    cfg: Config, source: str | None, fallback_source: str | None
+) -> tuple[str, str]:
+    """Resolve effective CSV provider/source keys with explicit precedence.
+
+    Precedence:
+      1) explicit CLI options
+      2) dedicated [csv_resolver] defaults
+      3) [lastfm] source/fallback
+      4) hard safe defaults (qobuz/deezer)
+    """
+    csv_cfg = getattr(cfg.session, "csv_resolver", None)
+
+    csv_default_source = (getattr(csv_cfg, "default_source", "") or "").strip()
+    csv_default_fallback = (
+        getattr(csv_cfg, "default_fallback_source", "") or ""
+    ).strip()
+    configured_source = (cfg.session.lastfm.source or "").strip()
+    configured_fallback = (cfg.session.lastfm.fallback_source or "").strip()
+
+    effective_source = (
+        (source or "").strip() or csv_default_source or configured_source or "qobuz"
+    )
+    effective_fallback = (
+        (fallback_source or "").strip()
+        or csv_default_fallback
+        or configured_fallback
+        or "deezer"
+    )
+    if effective_fallback == effective_source:
+        effective_fallback = "deezer" if effective_source != "deezer" else "qobuz"
+    return effective_source, effective_fallback
+
+
 def coro(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -274,7 +308,8 @@ async def url(ctx, urls):
     default="auto",
     help=(
         "File list mode. 'auto' tries JSON, then Exportify CSV, then URL list. "
-        "'exportify-csv' requires --source."
+        "'exportify-csv' requires --source (search provider/source). "
+        "Defaults are config-driven."
     ),
     show_default=True,
 )
@@ -284,8 +319,8 @@ async def url(ctx, urls):
     "source",
     default=None,
     help=(
-        "Primary search source for Exportify CSV mode "
-        "(default: [lastfm].source from config)."
+        "Primary search provider/source for Exportify CSV mode "
+        "(CLI > [csv_resolver].default_source > [lastfm].source > qobuz)."
     ),
 )
 @click.option(
@@ -294,8 +329,8 @@ async def url(ctx, urls):
     "fallback_source",
     default=None,
     help=(
-        "Fallback search source for Exportify CSV mode "
-        "(default: [lastfm].fallback_source from config)."
+        "Fallback search provider/source for Exportify CSV mode "
+        "(CLI > [csv_resolver].default_fallback_source > [lastfm].fallback_source > deezer)."
     ),
 )
 @click.pass_context
@@ -318,11 +353,8 @@ async def file(ctx, path, list_mode, source, fallback_source):
         with ctx.obj["config"] as cfg:
             async with Main(cfg) as main:
                 # Resolve effective source / fallback for CSV mode
-                _source = source or cfg.session.lastfm.source
-                _fallback = (
-                    fallback_source
-                    if fallback_source is not None
-                    else cfg.session.lastfm.fallback_source
+                _source, _fallback = _effective_csv_sources(
+                    cfg, source, fallback_source
                 )
 
                 async with aiofiles.open(path, "r", encoding="utf-8-sig") as f:
@@ -671,7 +703,10 @@ async def repair(ctx):
     "--source",
     "source",
     default=None,
-    help=("Primary search source for repair (default: [lastfm].source from config)."),
+    help=(
+        "Primary search provider/source for repair "
+        "(CLI > [csv_resolver].default_source > [lastfm].source > qobuz)."
+    ),
 )
 @click.option(
     "-fs",
@@ -679,13 +714,31 @@ async def repair(ctx):
     "fallback_source",
     default=None,
     help=(
-        "Fallback search source for repair "
-        "(default: [lastfm].fallback_source from config)."
+        "Fallback search provider/source for repair "
+        "(CLI > [csv_resolver].default_fallback_source > [lastfm].fallback_source > deezer)."
     ),
+)
+@click.option(
+    "--accept-lowscore",
+    is_flag=True,
+    default=False,
+    help=(
+        "Repair mode only: allow guarded low-confidence matches "
+        "(opt-in; strict mode remains default)."
+    ),
+)
+@click.option(
+    "--lowscore-floor",
+    type=click.IntRange(min=0, max=100),
+    default=25,
+    show_default=True,
+    help="Minimum candidate score allowed when --accept-lowscore is enabled.",
 )
 @click.pass_context
 @coro
-async def repair_csv(ctx, path, source, fallback_source):
+async def repair_csv(
+    ctx, path, source, fallback_source, accept_lowscore, lowscore_floor
+):
     """Retry unresolved rows from a previous Exportify CSV import.
 
     Reads the ``*_unresolved.csv`` log produced by a prior ``rip file``
@@ -711,13 +764,14 @@ async def repair_csv(ctx, path, source, fallback_source):
 
     failures = 0
     with cfg as c:
-        _source = source or c.session.lastfm.source
-        _fallback_source = fallback_source or c.session.lastfm.fallback_source or ""
+        _source, _fallback_source = _effective_csv_sources(c, source, fallback_source)
         async with Main(c) as main:
             await main.repair_csv(
                 unresolved_csv_path=path,
                 source=_source,
                 fallback_source=_fallback_source,
+                accept_lowscore=accept_lowscore,
+                lowscore_floor=lowscore_floor,
             )
             failures = await main.rip()
 

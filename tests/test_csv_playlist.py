@@ -122,6 +122,25 @@ def _make_config(
     cfg.session.artwork = MagicMock()
     cfg.session.lastfm.source = "qobuz"
     cfg.session.lastfm.fallback_source = "deezer"
+    cfg.session.csv_resolver = SimpleNamespace(
+        search_inflight_per_provider=3,
+        metadata_inflight_per_provider=2,
+        url_inflight_per_provider=2,
+        provider_min_interval_seconds=0.2,
+        cooldown_base_seconds=10.0,
+        cooldown_max_seconds=120.0,
+        failure_streak_for_cooldown=4,
+        escalation_search_limit=15,
+        default_source="qobuz",
+        default_fallback_source="deezer",
+        local_skip_enabled=False,
+        local_skip_paths=[],
+        local_skip_extensions=["flac", "mp3", "m4a", "ogg", "opus", "aac"],
+        local_skip_require_duration_check=True,
+        local_skip_duration_tolerance_ratio=0.20,
+        local_skip_duration_tolerance_seconds=12,
+        local_skip_max_file_scan=25000,
+    )
 
     qobuz_cfg = MagicMock()
     qobuz_cfg.quality = primary_quality
@@ -904,7 +923,7 @@ async def test_pending_csv_playlist_query_cache_avoids_duplicate_search_calls():
         "/tmp",
         [3, 2, 1, 0],
         [],
-        pending.Status(0, 0, 0, len(rows)),
+        pending.Status(0, 0, 0, 0, 0, len(rows)),
         callback=None,
     )
     count_after_first_row = primary_client.search.await_count
@@ -913,7 +932,7 @@ async def test_pending_csv_playlist_query_cache_avoids_duplicate_search_calls():
         "/tmp",
         [3, 2, 1, 0],
         [],
-        pending.Status(0, 0, 0, len(rows)),
+        pending.Status(0, 0, 0, 0, 0, len(rows)),
         callback=None,
     )
     assert primary_client.search.await_count == count_after_first_row
@@ -1052,6 +1071,189 @@ async def test_pending_csv_playlist_low_confidence_result_marked_unresolved(tmp_
 
 
 @pytest.mark.asyncio
+async def test_pending_csv_playlist_local_skip_skips_provider_search(tmp_path):
+    db = _make_db()
+    cfg = _make_config()
+    cfg.session.downloads.folder = str(tmp_path)
+    cfg.session.csv_resolver.local_skip_enabled = True
+    cfg.session.csv_resolver.local_skip_paths = [str(tmp_path)]
+    cfg.session.csv_resolver.local_skip_require_duration_check = False
+
+    (tmp_path / "Blue in Green.flac").write_bytes(b"fake")
+
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(return_value=[])
+
+    row = _make_row(title="Blue in Green", artists=["Miles Davis"])
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+
+    result = await pending.resolve()
+    assert result is None
+    primary_client.search.assert_not_called()
+    assert db.stats.skipped == 1
+    assert pending.local_skipped_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_local_skip_ambiguous_match_does_not_skip(tmp_path):
+    db = _make_db()
+    cfg = _make_config()
+    cfg.session.downloads.folder = str(tmp_path)
+    cfg.session.csv_resolver.local_skip_enabled = True
+    cfg.session.csv_resolver.local_skip_paths = [str(tmp_path)]
+    cfg.session.csv_resolver.local_skip_require_duration_check = False
+
+    (tmp_path / "Song.flac").write_bytes(b"fake")
+    (tmp_path / "Album 2" / "Song.flac").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Album 2" / "Song.flac").write_bytes(b"fake")
+
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(return_value=[])
+
+    row = _make_row(title="Song", artists=["Artist"])
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+
+    result = await pending.resolve()
+    assert result is None
+    primary_client.search.assert_called()
+    assert db.stats.skipped == 0
+    assert pending.local_skipped_count == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_repair_accepts_guarded_lowscore_when_opted_in():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+
+    primary_client.search = AsyncMock(
+        return_value=[
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "id": 10,
+                            "title": "Blue in Gren",
+                            "performer": {"name": "Miles Davis"},
+                            "album": {"title": "Kind of Blue"},
+                            "isrc": "",
+                            "release_date_original": "1959",
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+    primary_client.get_metadata = AsyncMock(
+        return_value={
+            "id": 10,
+            "title": "Blue in Gren",
+            "performer": {"name": "Miles Davis"},
+            "album": {"title": "Kind of Blue"},
+            "release_date_original": "1959",
+            "duration": 320,
+        }
+    )
+
+    row = _make_row(title="Blue in Green", artists=["Miles Davis"])
+    row.duration_ms = 315000
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+        repair_mode=True,
+        accept_lowscore=True,
+        lowscore_floor=25,
+    )
+
+    result = await pending.resolve()
+    assert result is not None
+    assert pending.low_score_accepted_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_repair_rejects_ambiguous_competing_lowscores():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    fallback_client = _make_client("deezer")
+
+    primary_client.search = AsyncMock(
+        return_value=[
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "id": 11,
+                            "title": "Blue in Gren",
+                            "performer": {"name": "Miles Davis"},
+                            "album": {"title": "Kind of Blue"},
+                            "release_date_original": "1959",
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+    fallback_client.search = AsyncMock(
+        return_value=[
+            {
+                "data": [
+                    {
+                        "id": 22,
+                        "title": "Blue in Grain",
+                        "artist": {"name": "Miles Davis"},
+                        "album": {"title": "Kind of Blue"},
+                        "release_date": "1959",
+                    }
+                ]
+            }
+        ]
+    )
+    primary_client.get_metadata = AsyncMock(
+        return_value={"id": 11, "title": "Blue in Gren", "duration": 320}
+    )
+    fallback_client.get_metadata = AsyncMock(
+        return_value={"id": 22, "title": "Blue in Grain", "duration": 320}
+    )
+
+    row = _make_row(title="Blue in Green", artists=["Miles Davis"])
+    row.duration_ms = 315000
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[row],
+        primary_client=primary_client,
+        fallback_client=fallback_client,
+        config=cfg,
+        db=db,
+        repair_mode=True,
+        accept_lowscore=True,
+        lowscore_floor=25,
+    )
+
+    result = await pending.resolve()
+    assert result is None
+    assert pending.low_score_accepted_count == 0
+
+
+@pytest.mark.asyncio
 async def test_pending_csv_playlist_search_errors_are_logged_as_search_failed(tmp_path):
     db = _make_db()
     unresolved_path = str(tmp_path / "unresolved.csv")
@@ -1076,7 +1278,7 @@ async def test_pending_csv_playlist_search_errors_are_logged_as_search_failed(tm
 
     with open(unresolved_path, encoding="utf-8") as fh:
         content = fh.read()
-    assert "search_failed" in content
+    assert "search failure" in content
 
 
 @pytest.mark.asyncio

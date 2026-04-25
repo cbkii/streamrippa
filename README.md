@@ -244,7 +244,9 @@ rip file Liked_Songs.csv
 # Explicit CSV mode
 rip file --list-mode exportify-csv Liked_Songs.csv
 
-# Override search sources (default: uses [lastfm].source / [lastfm].fallback_source from config)
+# Override search providers/sources.
+# Effective defaults: CLI > [csv_resolver].default_source/default_fallback_source
+# > [lastfm].source/fallback_source > qobuz/deezer.
 rip file --list-mode exportify-csv --source qobuz --fallback-source deezer Liked_Songs.csv
 rip file --list-mode exportify-csv --source deezer --fallback-source qobuz Liked_Songs.csv
 ```
@@ -270,6 +272,12 @@ For each CSV row, streamrip:
 
 **Rerunning is safe** — tracks already in the download database or on disk are skipped automatically.
 
+**Optional local prefilter (opt-in):**
+
+Enable `[csv_resolver].local_skip_enabled = true` to pre-scan local files and skip
+provider searches for high-confidence already-downloaded rows. Ambiguous local matches
+are not skipped.
+
 **Release note:** Exportify CSV imports no longer rewrite the source CSV or create a
 `*.original.csv` backup file; batching/sorting is now handled in memory.
 
@@ -282,6 +290,7 @@ provider-backed download failures tracked by `rip repair`.
 ```bash
 rip repair-csv Liked_Songs_unresolved.csv
 rip repair-csv --source qobuz --fallback-source deezer Liked_Songs_unresolved.csv
+rip repair-csv --accept-lowscore --lowscore-floor 28 Liked_Songs_unresolved.csv
 ```
 
 `rip repair-csv` re-runs unresolved rows using a larger search window and fuzzy title
@@ -289,6 +298,10 @@ matching, then writes a new audit file (`*_repair_unresolved.csv`) for anything 
 unresolved. When unresolved logs include provider candidate IDs, repair mode attempts
 those IDs first, then falls back to normal search/matching if they no longer resolve.
 Re-running repair passes is safe and keeps logs separate per pass.
+
+`--accept-lowscore` is **repair-only** and **opt-in**. It allows guarded low-confidence
+acceptance (floor + artist overlap + duration sanity checks) and is intended for manual
+recovery workflows when strict matching leaves rows unresolved.
 
 **Exportify column metadata mapping:**
 

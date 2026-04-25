@@ -118,7 +118,8 @@ bit_depth = 24
 lossy_bitrate = 320
 
 [csv_resolver]
-# CSV resolver controls concurrency, rate limiting, and cooldowns for CSV resolve/repair provider calls.
+# CSV resolver controls concurrency, rate limiting, and cooldowns for CSV resolve/repair
+# provider calls. In this config, "source" means provider key (e.g. qobuz/deezer).
 # Max in-flight search calls per provider (positive int; values <= 0 are clamped to 1). Default: 3.
 search_inflight_per_provider = 3
 # Max in-flight metadata calls per provider (positive int; values <= 0 are clamped to 1). Default: 2.
@@ -135,6 +136,24 @@ cooldown_max_seconds = 120.0
 failure_streak_for_cooldown = 4
 # Search result limit for escalation lane (positive int; invalid/<=0 falls back to default 15; higher values increase provider load).
 escalation_search_limit = 15
+# CSV resolve/repair primary search provider/source key when CLI --source is omitted.
+default_source = "qobuz"
+# CSV resolve/repair fallback provider/source key when CLI --fallback-source is omitted.
+default_fallback_source = "deezer"
+# Opt-in: pre-scan local audio files and skip provider searches for rows that already
+# exist on disk. Disabled by default to preserve existing behavior.
+local_skip_enabled = false
+# Optional folders to scan for local-skip matching. Empty list means: use [downloads].folder.
+local_skip_paths = []
+# File extensions considered by local-skip matching (case-insensitive).
+local_skip_extensions = ["flac", "mp3", "m4a", "ogg", "opus", "aac"]
+# If true, local skip validates expected CSV duration when available.
+local_skip_require_duration_check = true
+# Hybrid tolerance: accept when abs(actual-expected) <= max(seconds, expected*ratio).
+local_skip_duration_tolerance_ratio = 0.20
+local_skip_duration_tolerance_seconds = 12
+# Safety cap: max number of files scanned into the local-skip index.
+local_skip_max_file_scan = 25000
 
 # Filter a Qobuz artist's discography. Set to 'true' to turn on a filter.
 # This will also be applied to other sources, but is not guaranteed to work correctly
@@ -220,11 +239,11 @@ truncate_to = 120
 
 # Last.fm playlists are downloaded by searching for the titles of the tracks
 [lastfm]
-# The source on which to search for the tracks.
+# Search provider/source key used for track lookup.
 source = "qobuz"
-# If no results were found with the primary source, the item is searched for 
-# on this one.
-fallback_source = ""
+# Fallback provider/source key used when primary has no usable result.
+# Recommended for CSV/repair flows: "deezer".
+fallback_source = "deezer"
 
 [cli]
 # Print "Downloading {Album name}" etc. to screen

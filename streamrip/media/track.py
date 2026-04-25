@@ -240,13 +240,27 @@ class Track(Media):
 
         if actual_seconds <= 0:
             return
+
+        csv_cfg = getattr(self.config.session, "csv_resolver", None)
+        tolerance_ratio = float(
+            getattr(csv_cfg, "local_skip_duration_tolerance_ratio", 0.20) or 0.20
+        )
+        tolerance_seconds = float(
+            getattr(csv_cfg, "local_skip_duration_tolerance_seconds", 12) or 12
+        )
+
         expected_seconds = self.expected_duration_ms / 1000.0
-        delta = abs(actual_seconds - expected_seconds)
-        if actual_seconds < 45.0 and delta > 25.0:
+        if actual_seconds < 45.0 and expected_seconds >= 90.0:
+            is_match = False
+        else:
+            allowed_delta = max(tolerance_seconds, expected_seconds * tolerance_ratio)
+            is_match = abs(actual_seconds - expected_seconds) <= allowed_delta
+
+        if not is_match:
             try:
                 os.remove(self.download_path)
             except OSError as e:
-                self.logger.warning(
+                logger.warning(
                     "Could not remove invalid download '%s': %s",
                     self.download_path,
                     e,
