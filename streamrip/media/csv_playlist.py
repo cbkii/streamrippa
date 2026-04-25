@@ -97,6 +97,35 @@ class _ProviderBudget:
     disabled: bool = False
 
 
+async def _budgeted_get_raw_metadata(
+    candidate: "TrackCandidate",
+    provider_budgets: "dict[str, _ProviderBudget] | None",
+    provider_wait_fn,
+    provider_after_call_fn,
+) -> dict:
+    """Fetch raw track metadata for *candidate* honouring provider semaphores and cooldowns.
+
+    Acquires the per-source ``metadata_sem``, waits for any cooldown, then
+    calls ``candidate.client.get_metadata``.  On success invokes
+    ``provider_after_call_fn(source, ok=True, err=None)`` and returns the raw
+    response dict.  On any exception invokes
+    ``provider_after_call_fn(source, ok=False, err=e)`` and re-raises so the
+    caller can handle specific exception types.
+    """
+    try:
+        if provider_budgets is not None and candidate.source in provider_budgets:
+            async with provider_budgets[candidate.source].metadata_sem:
+                await provider_wait_fn(candidate.source)
+                resp = await candidate.client.get_metadata(candidate.id, "track")
+        else:
+            resp = await candidate.client.get_metadata(candidate.id, "track")
+        provider_after_call_fn(candidate.source, ok=True, err=None)
+        return resp
+    except Exception as e:
+        provider_after_call_fn(candidate.source, ok=False, err=e)
+        raise
+
+
 def _session_country_hint() -> str:
     """Best-effort country hint for unresolved CSV diagnostics.
 
@@ -857,18 +886,13 @@ class PendingCsvTrack(Pending):
                 return _MetaFetchResult(status=cached_status)
 
         try:
-            if (
-                self.provider_budgets is not None
-                and candidate.source in self.provider_budgets
-            ):
-                async with self.provider_budgets[candidate.source].metadata_sem:
-                    await self._provider_wait(candidate.source)
-                    resp = await candidate.client.get_metadata(candidate.id, "track")
-            else:
-                resp = await candidate.client.get_metadata(candidate.id, "track")
-            self._provider_after_call(candidate.source, ok=True, err=None)
+            resp = await _budgeted_get_raw_metadata(
+                candidate,
+                self.provider_budgets,
+                self._provider_wait,
+                self._provider_after_call,
+            )
         except NonStreamableError as e:
-            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Could not fetch metadata for %s:%s: %s",
                 candidate.source,
@@ -879,7 +903,6 @@ class PendingCsvTrack(Pending):
                 self.negative_candidate_cache[cache_key] = "matched unavailable"
             return _MetaFetchResult(status="matched unavailable")
         except Exception as e:
-            self._provider_after_call(candidate.source, ok=False, err=e)
             logger.debug(
                 "Unexpected error fetching metadata for %s:%s: %s",
                 candidate.source,
@@ -1108,12 +1131,10 @@ class PendingCsvPlaylist(Pending):
 
     def _get_duration_tolerance(self) -> tuple[float, float]:
         csv_cfg = self._csv_cfg()
-        ratio = float(
-            getattr(csv_cfg, "local_skip_duration_tolerance_ratio", 0.20) or 0.20
-        )
-        seconds = float(
-            getattr(csv_cfg, "local_skip_duration_tolerance_seconds", 12) or 12
-        )
+        ratio_val = getattr(csv_cfg, "local_skip_duration_tolerance_ratio", None)
+        ratio = float(ratio_val) if ratio_val is not None else 0.20
+        seconds_val = getattr(csv_cfg, "local_skip_duration_tolerance_seconds", None)
+        seconds = float(seconds_val) if seconds_val is not None else 12.0
         return max(0.0, ratio), max(0.0, seconds)
 
     def _build_local_index(self) -> None:
@@ -1780,24 +1801,15 @@ class PendingCsvPlaylist(Pending):
             # Duration sanity: only enforced when expected exists.
             if row.duration_ms:
                 try:
-                    if (
-                        self.provider_budgets is not None
-                        and candidate.source in self.provider_budgets
-                    ):
-                        async with self.provider_budgets[candidate.source].metadata_sem:
-                            await self._provider_wait(candidate.source)
-                            resp = await candidate.client.get_metadata(
-                                candidate.id, "track"
-                            )
-                    else:
-                        resp = await candidate.client.get_metadata(
-                            candidate.id, "track"
-                        )
-                    self._provider_after_call(candidate.source, ok=True, err=None)
+                    resp = await _budgeted_get_raw_metadata(
+                        candidate,
+                        self.provider_budgets,
+                        self._provider_wait,
+                        self._provider_after_call,
+                    )
                     duration_ms = _item_duration_ms(candidate.source, resp)
                     actual_seconds = (duration_ms / 1000.0) if duration_ms else None
                 except Exception as e:
-                    self._provider_after_call(candidate.source, ok=False, err=e)
                     logger.debug(
                         "Low-score duration guard read failed for %s:%s: %s",
                         candidate.source,
@@ -1815,12 +1827,18 @@ class PendingCsvPlaylist(Pending):
             return candidate
 
         # choose best guarded low-score candidate if strict acceptance failed
-        if primary_candidate is None and fallback_candidate is None:
-            maybe_low_primary = await _guarded_low_score_candidate(primary_outcome)
-            maybe_low_fallback = await _guarded_low_score_candidate(fallback_outcome)
-            low_candidates = [
-                c for c in (maybe_low_primary, maybe_low_fallback) if c is not None
-            ]
+        if (
+            primary_candidate is None
+            and fallback_candidate is None
+            and self.repair_mode
+            and self.accept_lowscore
+        ):
+            _gathered = await asyncio.gather(
+                _guarded_low_score_candidate(primary_outcome),
+                _guarded_low_score_candidate(fallback_outcome),
+                return_exceptions=True,
+            )
+            low_candidates = [c for c in _gathered if isinstance(c, TrackCandidate)]
             if low_candidates:
                 if (
                     len(low_candidates) > 1
