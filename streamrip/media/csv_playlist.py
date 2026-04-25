@@ -30,6 +30,7 @@ Unresolved rows (no candidate found from either service) are logged to
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -44,13 +45,15 @@ from rich.text import Text
 from ..client import Client
 from ..config import Config
 from ..console import console
-from ..db import Database
+from ..db import CsvResolverTelemetryLog, Database
 from ..exceptions import NonStreamableError
 from ..file_lists import (
+    CandidateExplanation,
     ExportifyCsvRow,
     MatchPolicy,
     _artist_overlap,
     _duration_match_with_tolerance,
+    explain_candidate_score,
     is_usable_exportify_row,
     score_candidate,
     score_candidate_repair,
@@ -83,6 +86,11 @@ REASON_NO_RESULTS = "no results"
 REASON_SEARCH_FAILURE = "search failure"
 REASON_LOW_CONFIDENCE = "low confidence"
 REASON_QUALITY_UNAVAILABLE = "quality unavailable"
+CONF_REJECT = "reject"
+CONF_LOW = "low"
+CONF_MEDIUM = "medium"
+CONF_HIGH = "high"
+TELEMETRY_SCHEMA_VERSION = "csv_resolver_outcome_v1"
 
 
 @dataclass(slots=True)
@@ -149,6 +157,10 @@ class TrackCandidate:
     isrc: str
     score: int
     client: Client
+    reason_codes: tuple[str, ...] = ()
+    signals: dict[str, object] | None = None
+    confidence: str = "reject"
+    margin_to_second: int = 0
 
 
 @dataclass(slots=True)
@@ -157,6 +169,7 @@ class ResolverOutcome:
     reason: str
     query: str
     strategy: str
+    rejected: list[TrackCandidate] | None = None
 
 
 def _build_quality_sequence(source: str, max_quality: int) -> list[int]:
@@ -214,15 +227,31 @@ def _item_album(source: str, item: dict) -> str:
 
 
 def _item_date(source: str, item: dict) -> str:
+    def _first_nonempty(*values: str | None) -> str:
+        for value in values:
+            if value:
+                return str(value)
+        return ""
+
     if source == "deezer":
-        return item.get("release_date") or item.get("album", {}).get("release_date", "")
+        return _first_nonempty(
+            item.get("recording_date"),
+            item.get("release_date"),
+            item.get("album", {}).get("recording_date"),
+            item.get("album", {}).get("release_date"),
+        )
     if source == "qobuz":
-        return item.get("release_date_original") or item.get("album", {}).get(
-            "release_date_original", ""
+        return _first_nonempty(
+            item.get("release_date_original"),
+            item.get("album", {}).get("release_date_original"),
+            item.get("release_date"),
+            item.get("album", {}).get("release_date"),
         )
     if source == "tidal":
-        return item.get("streamStartDate", "") or item.get("album", {}).get(
-            "releaseDate", ""
+        return _first_nonempty(
+            item.get("copyrightYear"),
+            item.get("streamStartDate"),
+            item.get("album", {}).get("releaseDate"),
         )
     return ""
 
@@ -481,6 +510,72 @@ def _candidate_reason(candidate: TrackCandidate | None, min_score: int) -> str:
     return "matched"
 
 
+def _confidence_for_candidate(
+    candidate: TrackCandidate | None, min_score: int, margin_to_second: int
+) -> str:
+    if candidate is None or candidate.score < min_score:
+        return CONF_REJECT
+    if candidate.score >= min_score + 20 and margin_to_second >= 8:
+        return CONF_HIGH
+    if candidate.score >= min_score + 10 and margin_to_second >= 4:
+        return CONF_MEDIUM
+    return CONF_LOW
+
+
+def _provider_threshold(csv_cfg, source: str, *, repair_mode: bool) -> int:
+    default_threshold = (
+        _MIN_ACCEPTABLE_SCORE_REPAIR if repair_mode else _MIN_ACCEPTABLE_SCORE
+    )
+    raw_map = getattr(csv_cfg, "acceptance_threshold_by_source", {}) if csv_cfg else {}
+    if isinstance(raw_map, dict):
+        raw = raw_map.get(source, default_threshold)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid csv_resolver.acceptance_threshold_by_source value for '%s': %r; using default=%d",
+                source,
+                raw,
+                default_threshold,
+            )
+            return default_threshold
+    if raw_map:
+        logger.warning(
+            "Invalid csv_resolver.acceptance_threshold_by_source type %s; using defaults",
+            type(raw_map).__name__,
+        )
+    return default_threshold
+
+
+def _serialize_rejected_candidate(candidate: TrackCandidate) -> str:
+    return json.dumps(
+        {
+            "source": candidate.source,
+            "id": candidate.id,
+            "title": candidate.title,
+            "artist": candidate.artist,
+            "album": candidate.album,
+            "date": candidate.release_date,
+            "isrc": candidate.isrc,
+            "score": candidate.score,
+            "reason_codes": list(candidate.reason_codes),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _margin_to_second_best(score: int, population_scores: list[int]) -> int:
+    if not population_scores:
+        return 0
+    ranked = sorted(population_scores, reverse=True)
+    best = ranked[0]
+    if score < best:
+        return 0
+    second = ranked[1] if len(ranked) > 1 else 0
+    return max(0, score - second)
+
+
 def _pick_top_candidates(
     row: ExportifyCsvRow,
     source: str,
@@ -508,8 +603,9 @@ def _pick_top_candidates(
         date = _item_date(source, item)
         isrc = _item_isrc(source, item)
         duration_ms = _item_duration_ms(source, item)
-        score = (
-            score_candidate_repair(
+        explain: CandidateExplanation | None = None
+        if repair_mode:
+            score = score_candidate_repair(
                 row,
                 title,
                 artist,
@@ -519,8 +615,8 @@ def _pick_top_candidates(
                 duration_ms,
                 policy=active_policy,
             )
-            if repair_mode
-            else score_candidate(
+        else:
+            explain = explain_candidate_score(
                 row,
                 title,
                 artist,
@@ -530,7 +626,7 @@ def _pick_top_candidates(
                 duration_ms,
                 policy=active_policy,
             )
-        )
+            score = explain.score
         if score <= 0:
             continue
         scored.append(
@@ -544,10 +640,67 @@ def _pick_top_candidates(
                 isrc=isrc,
                 score=score,
                 client=client,
+                reason_codes=explain.reason_codes if explain is not None else (),
+                signals=explain.signals if explain is not None else None,
             )
         )
     scored.sort(key=lambda c: c.score, reverse=True)
     return scored[:limit]
+
+
+def _top_rejected_candidates(
+    row: ExportifyCsvRow,
+    source: str,
+    pages: list[dict],
+    client: Client,
+    *,
+    policy: MatchPolicy | None = None,
+    limit: int = 2,
+) -> list[TrackCandidate]:
+    items = _extract_raw_results(source, pages)
+    active_policy = policy or MatchPolicy()
+    rejected: list[TrackCandidate] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        item_id = str(item.get("id", "")).strip()
+        if not item_id or item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        title = _item_title(source, item)
+        artist = _item_artist(source, item)
+        album = _item_album(source, item)
+        date = _item_date(source, item)
+        isrc = _item_isrc(source, item)
+        duration_ms = _item_duration_ms(source, item)
+        explain = explain_candidate_score(
+            row,
+            title,
+            artist,
+            album,
+            date,
+            isrc,
+            duration_ms,
+            policy=active_policy,
+        )
+        if explain.score > 0:
+            continue
+        rejected.append(
+            TrackCandidate(
+                source=source,
+                id=item_id,
+                title=title,
+                artist=artist,
+                album=album,
+                release_date=date,
+                isrc=isrc,
+                score=explain.score,
+                client=client,
+                reason_codes=explain.reason_codes,
+                signals=explain.signals,
+            )
+        )
+    rejected.sort(key=lambda c: (c.score, c.id), reverse=True)
+    return rejected[:limit]
 
 
 def _build_extra_tags(
@@ -1522,8 +1675,13 @@ class PendingCsvPlaylist(Pending):
             except (TypeError, ValueError):
                 escalation_limit = _REPAIR_SEARCH_LIMIT
         search_limit = _REPAIR_SEARCH_LIMIT if self.repair_mode else _SEARCH_LIMIT
-        min_score = (
-            _MIN_ACCEPTABLE_SCORE_REPAIR if self.repair_mode else _MIN_ACCEPTABLE_SCORE
+        primary_min_score = _provider_threshold(
+            csv_cfg, self.primary_client.source, repair_mode=self.repair_mode
+        )
+        fallback_min_score = _provider_threshold(
+            csv_cfg,
+            self.fallback_client.source if self.fallback_client else "",
+            repair_mode=self.repair_mode,
         )
         low_score_floor = max(
             0,
@@ -1537,6 +1695,9 @@ class PendingCsvPlaylist(Pending):
 
         primary_outcome = ResolverOutcome(None, "no results", "", "")
         fallback_outcome = ResolverOutcome(None, "no results", "", "")
+        telemetry = CsvResolverTelemetryLog(
+            str(getattr(csv_cfg, "telemetry_jsonl_path", "") or "")
+        )
 
         if not is_usable_exportify_row(row):
             reason = "invalid row: missing track name or artist"
@@ -1610,6 +1771,9 @@ class PendingCsvPlaylist(Pending):
                   - strategy: the query strategy that produced the returned candidate (or the last attempted strategy on failure).
             """
             queries = _build_search_queries(row, client.source, escalation=escalation)
+            provider_min_score = _provider_threshold(
+                csv_cfg, client.source, repair_mode=self.repair_mode
+            )
             if (
                 self.provider_budgets is not None
                 and self.provider_budgets[client.source].disabled
@@ -1621,9 +1785,31 @@ class PendingCsvPlaylist(Pending):
                     strategy="provider-disabled",
                 )
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
+            closest_rejected: list[TrackCandidate] = []
+            seen_candidate_scores: list[int] = []
             had_error = False
             last_query = ""
             last_strategy = ""
+
+            def _add_rejected(candidate: TrackCandidate, reason_code: str) -> None:
+                enriched = TrackCandidate(
+                    source=candidate.source,
+                    id=candidate.id,
+                    title=candidate.title,
+                    artist=candidate.artist,
+                    album=candidate.album,
+                    release_date=candidate.release_date,
+                    isrc=candidate.isrc,
+                    score=candidate.score,
+                    client=candidate.client,
+                    reason_codes=tuple((*candidate.reason_codes, reason_code)),
+                    signals=candidate.signals,
+                    confidence=candidate.confidence,
+                    margin_to_second=candidate.margin_to_second,
+                )
+                closest_rejected.append(enriched)
+                closest_rejected.sort(key=lambda c: c.score, reverse=True)
+                del closest_rejected[2:]
 
             hinted_id = ""
             if self.repair_mode and row.repair_candidate_ids:
@@ -1674,14 +1860,29 @@ class PendingCsvPlaylist(Pending):
                         ),
                         client=client,
                     )
-                    reason = _candidate_reason(hinted_candidate, min_score)
+                    reason = _candidate_reason(hinted_candidate, provider_min_score)
+                    hinted_candidate.confidence = _confidence_for_candidate(
+                        hinted_candidate,
+                        provider_min_score,
+                        _margin_to_second_best(
+                            hinted_candidate.score,
+                            [*seen_candidate_scores, hinted_candidate.score],
+                        ),
+                    )
+                    hinted_candidate.margin_to_second = _margin_to_second_best(
+                        hinted_candidate.score,
+                        [*seen_candidate_scores, hinted_candidate.score],
+                    )
+                    seen_candidate_scores.append(hinted_candidate.score)
                     if reason == "matched":
                         return ResolverOutcome(
                             candidate=hinted_candidate,
                             reason=reason,
                             query=hinted_id,
                             strategy="id-hint",
+                            rejected=closest_rejected,
                         )
+                    _add_rejected(hinted_candidate, "reject_below_threshold")
                     best_low_conf = (hinted_id, "id-hint", hinted_candidate)
                 except Exception as e:
                     self._provider_after_call(client.source, ok=False, err=e)
@@ -1728,6 +1929,18 @@ class PendingCsvPlaylist(Pending):
                         limit=_SHORTLIST_K,
                         policy=match_policy,
                     )
+                    if top_candidates:
+                        batch_scores = [cand.score for cand in top_candidates]
+                        population_scores = seen_candidate_scores + batch_scores
+                        for idx, cand in enumerate(top_candidates):
+                            _ = idx
+                            cand.margin_to_second = _margin_to_second_best(
+                                cand.score, population_scores
+                            )
+                            cand.confidence = _confidence_for_candidate(
+                                cand, provider_min_score, cand.margin_to_second
+                            )
+                        seen_candidate_scores.extend(batch_scores)
                 except Exception as e:
                     self._provider_after_call(client.source, ok=False, err=e)
                     if (
@@ -1746,22 +1959,35 @@ class PendingCsvPlaylist(Pending):
                     continue
 
                 for candidate in top_candidates:
-                    reason = _candidate_reason(candidate, min_score)
+                    reason = _candidate_reason(candidate, provider_min_score)
                     if reason == "matched":
-                        return ResolverOutcome(candidate, reason, query, strategy)
+                        rejected = closest_rejected + _top_rejected_candidates(
+                            row,
+                            client.source,
+                            pages,
+                            client,
+                            policy=match_policy,
+                            limit=2,
+                        )
+                        rejected.sort(key=lambda c: c.score, reverse=True)
+                        return ResolverOutcome(
+                            candidate, reason, query, strategy, rejected=rejected[:2]
+                        )
                     if (
                         best_low_conf is None
                         or candidate.score > best_low_conf[2].score
                     ):
                         best_low_conf = (query, strategy, candidate)
+                    _add_rejected(candidate, "reject_below_threshold")
 
             if best_low_conf is not None:
                 query, strategy, candidate = best_low_conf
                 return ResolverOutcome(
                     candidate=candidate,
-                    reason=_candidate_reason(candidate, min_score),
+                    reason=_candidate_reason(candidate, provider_min_score),
                     query=query,
                     strategy=strategy,
+                    rejected=closest_rejected[:2],
                 )
             if had_error:
                 return ResolverOutcome(
@@ -1784,14 +2010,14 @@ class PendingCsvPlaylist(Pending):
         # Search fallback service if configured
         if self.fallback_client is not None and not (
             primary_outcome.candidate is not None
-            and primary_outcome.candidate.score >= min_score
+            and primary_outcome.candidate.score >= primary_min_score
         ):
             fallback_outcome = await _resolve_for_client(
                 self.fallback_client, escalation=False
             )
         if (
             primary_outcome.candidate is None
-            or primary_outcome.candidate.score < min_score
+            or primary_outcome.candidate.score < primary_min_score
         ):
             primary_outcome = await _resolve_for_client(
                 self.primary_client, escalation=True
@@ -1800,11 +2026,11 @@ class PendingCsvPlaylist(Pending):
             self.fallback_client is not None
             and (
                 fallback_outcome.candidate is None
-                or fallback_outcome.candidate.score < min_score
+                or fallback_outcome.candidate.score < fallback_min_score
             )
             and (
                 primary_outcome.candidate is None
-                or primary_outcome.candidate.score < min_score
+                or primary_outcome.candidate.score < primary_min_score
             )
         ):
             fallback_outcome = await _resolve_for_client(
@@ -1814,15 +2040,33 @@ class PendingCsvPlaylist(Pending):
         primary_candidate = (
             primary_outcome.candidate
             if primary_outcome.candidate
-            and primary_outcome.candidate.score >= min_score
+            and primary_outcome.candidate.score >= primary_min_score
             else None
         )
         fallback_candidate = (
             fallback_outcome.candidate
             if fallback_outcome.candidate
-            and fallback_outcome.candidate.score >= min_score
+            and fallback_outcome.candidate.score >= fallback_min_score
             else None
         )
+
+        def _candidate_payload(c: TrackCandidate | None) -> dict | None:
+            if c is None:
+                return None
+            return {
+                "source": c.source,
+                "id": c.id,
+                "title": c.title,
+                "artist": c.artist,
+                "album": c.album,
+                "date": c.release_date,
+                "isrc": c.isrc,
+                "score": c.score,
+                "confidence": c.confidence,
+                "margin_to_second": c.margin_to_second,
+                "reason_codes": list(c.reason_codes),
+                "signals": c.signals or {},
+            }
 
         async def _guarded_low_score_candidate(
             outcome: ResolverOutcome | None,
@@ -1832,7 +2076,12 @@ class PendingCsvPlaylist(Pending):
             candidate = outcome.candidate
             if candidate is None:
                 return None
-            if candidate.score < low_score_floor or candidate.score >= min_score:
+            provider_min = (
+                primary_min_score
+                if candidate.source == self.primary_client.source
+                else fallback_min_score
+            )
+            if candidate.score < low_score_floor or candidate.score >= provider_min:
                 return None
             if not row.artists_list and not row.artists_raw:
                 return None
@@ -1922,6 +2171,49 @@ class PendingCsvPlaylist(Pending):
                         low_score_floor,
                     )
 
+        selected = primary_candidate or fallback_candidate
+        telemetry.log(
+            {
+                "schema_version": TELEMETRY_SCHEMA_VERSION,
+                "row": {
+                    "row_index": row.row_index,
+                    "source_row_index": row.source_row_index,
+                    "track_name": row.track_name,
+                    "artists": row.artists_raw,
+                    "album": row.album,
+                    "release_date": row.release_date,
+                    "isrc": row.isrc,
+                },
+                "provider_outcomes": {
+                    "primary": {
+                        "source": self.primary_client.source,
+                        "threshold": primary_min_score,
+                        "reason": primary_outcome.reason,
+                        "candidate": _candidate_payload(primary_outcome.candidate),
+                        "rejected": [
+                            _candidate_payload(c)
+                            for c in (primary_outcome.rejected or [])
+                            if _candidate_payload(c) is not None
+                        ],
+                    },
+                    "fallback": {
+                        "source": (
+                            self.fallback_client.source if self.fallback_client else ""
+                        ),
+                        "threshold": fallback_min_score,
+                        "reason": fallback_outcome.reason,
+                        "candidate": _candidate_payload(fallback_outcome.candidate),
+                        "rejected": [
+                            _candidate_payload(c)
+                            for c in (fallback_outcome.rejected or [])
+                            if _candidate_payload(c) is not None
+                        ],
+                    },
+                },
+                "selected": _candidate_payload(selected),
+            }
+        )
+
         if primary_candidate is None and fallback_candidate is None:
             failure_reasons = ", ".join(
                 [
@@ -1975,6 +2267,56 @@ class PendingCsvPlaylist(Pending):
                     ),
                     attempted_query=" || ".join(
                         q for q in (primary_outcome.query, fallback_outcome.query) if q
+                    ),
+                    primary_confidence=(
+                        primary_outcome.candidate.confidence
+                        if primary_outcome.candidate is not None
+                        else CONF_REJECT
+                    ),
+                    fallback_confidence=(
+                        fallback_outcome.candidate.confidence
+                        if fallback_outcome.candidate is not None
+                        else CONF_REJECT
+                    ),
+                    primary_margin=(
+                        str(primary_outcome.candidate.margin_to_second)
+                        if primary_outcome.candidate is not None
+                        else ""
+                    ),
+                    fallback_margin=(
+                        str(fallback_outcome.candidate.margin_to_second)
+                        if fallback_outcome.candidate is not None
+                        else ""
+                    ),
+                    primary_reject_1=(
+                        _serialize_rejected_candidate(
+                            (primary_outcome.rejected or [None])[0]
+                        )
+                        if primary_outcome.rejected
+                        else ""
+                    ),
+                    primary_reject_2=(
+                        _serialize_rejected_candidate(
+                            (primary_outcome.rejected or [None, None])[1]
+                        )
+                        if primary_outcome.rejected
+                        and len(primary_outcome.rejected) > 1
+                        else ""
+                    ),
+                    fallback_reject_1=(
+                        _serialize_rejected_candidate(
+                            (fallback_outcome.rejected or [None])[0]
+                        )
+                        if fallback_outcome.rejected
+                        else ""
+                    ),
+                    fallback_reject_2=(
+                        _serialize_rejected_candidate(
+                            (fallback_outcome.rejected or [None, None])[1]
+                        )
+                        if fallback_outcome.rejected
+                        and len(fallback_outcome.rejected) > 1
+                        else ""
                     ),
                 )
             if callback:

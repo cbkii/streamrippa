@@ -1,6 +1,7 @@
 """Wrapper over a database that stores item IDs."""
 
 import csv
+import json
 import logging
 import os
 import sqlite3
@@ -303,6 +304,18 @@ class UnresolvedQueryLog:
         "query_strategy",
         "attempted_query",
         "attempt_trace",
+        "primary_confidence",
+        "fallback_confidence",
+        "primary_margin",
+        "fallback_margin",
+        "primary_reject_1",
+        "primary_reject_2",
+        "fallback_reject_1",
+        "fallback_reject_2",
+        "override_primary_source",
+        "override_primary_candidate_id",
+        "override_fallback_source",
+        "override_fallback_candidate_id",
     ]
 
     def __init__(self, path: str):
@@ -368,6 +381,18 @@ class UnresolvedQueryLog:
         query_strategy: str = "",
         attempted_query: str = "",
         attempt_trace: str = "",
+        primary_confidence: str = "",
+        fallback_confidence: str = "",
+        primary_margin: str = "",
+        fallback_margin: str = "",
+        primary_reject_1: str = "",
+        primary_reject_2: str = "",
+        fallback_reject_1: str = "",
+        fallback_reject_2: str = "",
+        override_primary_source: str = "",
+        override_primary_candidate_id: str = "",
+        override_fallback_source: str = "",
+        override_fallback_candidate_id: str = "",
     ):
         """
         Append a timestamped unresolved-query row to the CSV log file.
@@ -416,6 +441,18 @@ class UnresolvedQueryLog:
             "query_strategy": query_strategy,
             "attempted_query": attempted_query,
             "attempt_trace": attempt_trace,
+            "primary_confidence": primary_confidence,
+            "fallback_confidence": fallback_confidence,
+            "primary_margin": primary_margin,
+            "fallback_margin": fallback_margin,
+            "primary_reject_1": primary_reject_1,
+            "primary_reject_2": primary_reject_2,
+            "fallback_reject_1": fallback_reject_1,
+            "fallback_reject_2": fallback_reject_2,
+            "override_primary_source": override_primary_source,
+            "override_primary_candidate_id": override_primary_candidate_id,
+            "override_fallback_source": override_fallback_source,
+            "override_fallback_candidate_id": override_fallback_candidate_id,
         }
         with open(self.path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
@@ -425,6 +462,28 @@ class UnresolvedQueryLog:
     def has_entries(self) -> bool:
         """True if at least one entry was written in the current session."""
         return self._has_entries
+
+
+class CsvResolverTelemetryLog:
+    """Append-only JSONL telemetry log for CSV resolver scoring outcomes."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._enabled = bool(path)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def log(self, payload: dict) -> None:
+        if not self._enabled:
+            return
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                f.write("\n")
+        except OSError as exc:
+            logger.warning("Failed to write CSV resolver telemetry: %s", exc)
 
 
 @dataclass(slots=True)

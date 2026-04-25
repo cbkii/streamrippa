@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,7 +22,10 @@ from streamrip.media.csv_playlist import (
     _build_search_queries,
     _CandidateMeta,
     _chunks,
+    _confidence_for_candidate,
     _extract_raw_results,
+    _item_date,
+    _margin_to_second_best,
     _MetaFetchResult,
     _pick_best_candidate,
     _pick_best_candidate_repair,
@@ -140,6 +145,10 @@ def _make_config(
         local_skip_duration_tolerance_ratio=0.20,
         local_skip_duration_tolerance_seconds=12,
         local_skip_max_file_scan=25000,
+        bad_context_fields=["title", "album"],
+        acceptance_threshold_by_source={},
+        telemetry_jsonl_path="",
+        enable_guarded_fuzzy_normal=False,
     )
 
     qobuz_cfg = MagicMock()
@@ -208,6 +217,26 @@ def test_extract_raw_results_qobuz():
 
 def test_extract_raw_results_empty_pages():
     assert _extract_raw_results("deezer", []) == []
+
+
+def test_item_date_prefers_recording_intent_fields():
+    deezer_item = {
+        "recording_date": "1991-01-01",
+        "release_date": "2012-01-01",
+        "album": {"release_date": "2012-01-01"},
+    }
+    assert _item_date("deezer", deezer_item) == "1991-01-01"
+
+
+def test_confidence_uses_score_and_margin():
+    cand = _make_candidate("qobuz", _make_client("qobuz"), score=80)
+    assert _confidence_for_candidate(cand, 50, 9) == "high"
+    assert _confidence_for_candidate(cand, 50, 3) == "low"
+
+
+def test_margin_to_second_best_uses_population_across_queries():
+    # score 91 with previously seen 88 and current 90 -> margin should be 1
+    assert _margin_to_second_best(91, [88, 90, 91]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1067,7 +1096,97 @@ async def test_pending_csv_playlist_low_confidence_result_marked_unresolved(tmp_
     assert ("low confidence" in content) or ("no results" in content)
     assert "query_strategy" in content
     assert "attempted_query" in content
+    assert "primary_reject_1" in content
     assert ",US," in content
+    with open(unresolved_path, encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    if rows and rows[0].get("primary_reject_1"):
+        parsed = json.loads(rows[0]["primary_reject_1"])
+        assert isinstance(parsed, dict)
+        assert "id" in parsed
+
+
+@pytest.mark.asyncio
+async def test_provider_specific_threshold_applies(tmp_path):
+    db = _make_db()
+    from streamrip.db import UnresolvedQueryLog
+
+    unresolved_path = str(tmp_path / "unresolved.csv")
+    db.unresolved_log = UnresolvedQueryLog(unresolved_path)
+    cfg = _make_config()
+    cfg.session.csv_resolver.acceptance_threshold_by_source = {"qobuz": 95}
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(
+        return_value=[
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "id": 10,
+                            "title": "Blue in Green",
+                            "performer": {"name": "Miles Davis"},
+                            "album": {"title": "Kind of Blue"},
+                            "isrc": "",
+                            "release_date_original": "1959",
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[
+            _make_row(
+                title="Blue in Green",
+                artists=["Miles Davis"],
+                album="Kind of Blue",
+                date="1959",
+            )
+        ],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    result = await pending.resolve()
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_telemetry_jsonl_written(tmp_path):
+    db = _make_db()
+    cfg = _make_config()
+    telemetry_path = str(tmp_path / "resolver.jsonl")
+    cfg.session.csv_resolver.telemetry_jsonl_path = telemetry_path
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(return_value=[])
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[_make_row(title="Missing", artists=["Artist"])],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    await pending.resolve()
+    with open(telemetry_path, encoding="utf-8") as fh:
+        payload = json.loads(fh.read().strip().splitlines()[-1])
+    assert payload["schema_version"] == "csv_resolver_outcome_v1"
+    assert set(payload["provider_outcomes"].keys()) == {"primary", "fallback"}
+
+
+def test_provider_threshold_invalid_value_logs_warning(caplog):
+    cfg = _make_config()
+    cfg.session.csv_resolver.acceptance_threshold_by_source = {"qobuz": "bad"}
+    from streamrip.media.csv_playlist import _provider_threshold
+
+    with caplog.at_level("WARNING"):
+        result = _provider_threshold(
+            cfg.session.csv_resolver, "qobuz", repair_mode=False
+        )
+    assert result == 50
+    assert "Invalid csv_resolver.acceptance_threshold_by_source value" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1877,6 +1996,8 @@ def test_parse_unresolved_csv_round_trip(tmp_path):
         fallback_candidate_id="5678",
         reason="all quality/service combinations failed",
         row_index=0,
+        override_primary_source="qobuz",
+        override_primary_candidate_id="ovr123",
     )
     log.log(
         track_name="So What",
@@ -1903,7 +2024,7 @@ def test_parse_unresolved_csv_round_trip(tmp_path):
     assert row0.release_date == "1959"
     assert row0.isrc == "US-ABC-12-34567"
     assert row0.spotify_uri == "spotify:track:abc123"
-    assert row0.repair_candidate_ids == {"qobuz": "1234", "deezer": "5678"}
+    assert row0.repair_candidate_ids == {"qobuz": "ovr123", "deezer": "5678"}
 
     row1 = rows[1]
     assert row1.track_name == "So What"

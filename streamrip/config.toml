@@ -166,6 +166,16 @@ remaster_mode = "equivalent"
 year_ignore_for_remaster = true
 # Reject obvious junk release contexts (karaoke, tribute, commentary, podcast, etc).
 reject_bad_context_releases = true
+# Include-only fields scanned for bad-context markers. Unknown fields are ignored.
+# Env override: STREAMRIP_BAD_CONTEXT_FIELDS=title,album,version
+bad_context_fields = ["title", "album"]
+# Optional per-provider minimum acceptance score. Empty map keeps existing defaults.
+# Example: acceptance_threshold_by_source = { qobuz = 52, deezer = 50 }
+acceptance_threshold_by_source = {}
+# Optional JSONL file path for candidate scoring telemetry (empty disables).
+telemetry_jsonl_path = ""
+# Optional guarded fuzzy fallback in normal mode (strict high-similarity + corroboration).
+enable_guarded_fuzzy_normal = false
 
 # Filter a Qobuz artist's discography. Set to 'true' to turn on a filter.
 # This will also be applied to other sources, but is not guaranteed to work correctly
