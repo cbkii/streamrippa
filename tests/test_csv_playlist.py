@@ -823,10 +823,25 @@ async def test_pending_csv_playlist_query_cache_avoids_duplicate_search_calls():
         config=cfg,
         db=db,
     )
-    await pending.resolve()
-
-    # Each unique query should be requested at most once and reused for the second row.
-    assert primary_client.search.await_count <= 8
+    pending.query_cache = {}
+    await pending._resolve_row(
+        rows[0],
+        "/tmp",
+        [3, 2, 1, 0],
+        [],
+        pending.Status(0, 0, 0, len(rows)),
+        callback=None,
+    )
+    count_after_first_row = primary_client.search.await_count
+    await pending._resolve_row(
+        rows[1],
+        "/tmp",
+        [3, 2, 1, 0],
+        [],
+        pending.Status(0, 0, 0, len(rows)),
+        callback=None,
+    )
+    assert primary_client.search.await_count == count_after_first_row
 
 
 @pytest.mark.asyncio
@@ -1522,7 +1537,7 @@ async def test_repair_mode_falls_back_to_search_when_candidate_id_hint_fails():
 
 @pytest.mark.asyncio
 async def test_normal_mode_uses_standard_search_limit():
-    """In normal mode (repair_mode=False), the standard _SEARCH_LIMIT is used."""
+    """Normal mode uses _SEARCH_LIMIT initially and escalation_search_limit when escalated."""
     import streamrip.media.csv_playlist as csv_mod
 
     db = _make_db()
@@ -1552,7 +1567,8 @@ async def test_normal_mode_uses_standard_search_limit():
     await pending.resolve()
 
     assert search_limits
-    assert all(lim == csv_mod._SEARCH_LIMIT for lim in search_limits)
+    assert csv_mod._SEARCH_LIMIT in search_limits
+    assert any(lim > csv_mod._SEARCH_LIMIT for lim in search_limits)
 
 
 # ---------------------------------------------------------------------------

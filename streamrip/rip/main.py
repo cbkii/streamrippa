@@ -429,6 +429,9 @@ class Main:
         fail_fast = self.config.session.reliability.fail_fast
         top_level_failures = 0
         provider_health: dict[str, dict[str, int]] = {}
+        shared_query_cache: dict[tuple[str, str, int], list[dict]] | None = None
+        shared_negative_candidate_cache: dict[tuple[str, str], str] | None = None
+        shared_provider_budgets = None
         # Keep a defensive fallback because tests patch PendingCsvPlaylist with fakes
         # that may not define the resolver-specific fail-fast exception type.
         fail_fast_abort_type = getattr(PendingCsvPlaylist, "FailFastAbortError", None)
@@ -437,24 +440,51 @@ class Main:
             logger.info(
                 "Resolving CSV batch %d/%d (%d rows)", idx, len(batches), len(batch)
             )
-            pending_playlist = PendingCsvPlaylist(
-                playlist_name=playlist_name,
-                rows=batch,
-                primary_client=primary_client,
-                fallback_client=fallback_client,
-                config=self.config,
-                db=self.database,
-                repair_mode=repair_mode,
-            )
+            try:
+                pending_playlist = PendingCsvPlaylist(
+                    playlist_name=playlist_name,
+                    rows=batch,
+                    primary_client=primary_client,
+                    fallback_client=fallback_client,
+                    config=self.config,
+                    db=self.database,
+                    repair_mode=repair_mode,
+                    query_cache=shared_query_cache,
+                    negative_candidate_cache=shared_negative_candidate_cache,
+                    provider_budgets=shared_provider_budgets,
+                )
+            except TypeError:
+                pending_playlist = PendingCsvPlaylist(
+                    playlist_name=playlist_name,
+                    rows=batch,
+                    primary_client=primary_client,
+                    fallback_client=fallback_client,
+                    config=self.config,
+                    db=self.database,
+                    repair_mode=repair_mode,
+                )
+                if hasattr(pending_playlist, "query_cache"):
+                    pending_playlist.query_cache = shared_query_cache
+                if hasattr(pending_playlist, "negative_candidate_cache"):
+                    pending_playlist.negative_candidate_cache = (
+                        shared_negative_candidate_cache
+                    )
+                if hasattr(pending_playlist, "provider_budgets"):
+                    pending_playlist.provider_budgets = shared_provider_budgets
 
             failures_before = self.database.stats.failed
             try:
                 playlist = await pending_playlist.resolve()
                 budgets = getattr(pending_playlist, "provider_budgets", None)
+                shared_query_cache = getattr(pending_playlist, "query_cache", None)
+                shared_negative_candidate_cache = getattr(
+                    pending_playlist, "negative_candidate_cache", None
+                )
+                shared_provider_budgets = budgets
                 if budgets is not None:
-                    for source, budget in budgets.items():
+                    for provider, budget in budgets.items():
                         metrics = provider_health.setdefault(
-                            source,
+                            provider,
                             {
                                 "cooldowns": 0,
                                 "rate_limited": 0,
@@ -487,10 +517,10 @@ class Main:
 
         self._csv_top_level_failures += top_level_failures
         if provider_health:
-            for source, metrics in provider_health.items():
+            for provider, metrics in provider_health.items():
                 logger.info(
                     "CSV provider health %s: cooldowns=%d, rate_limited=%d, auth_errors=%d",
-                    source,
+                    provider,
                     metrics["cooldowns"],
                     metrics["rate_limited"],
                     metrics["auth_errors"],

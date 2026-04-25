@@ -5,7 +5,7 @@ import functools
 import logging
 import os
 import shutil
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import click
@@ -308,20 +308,9 @@ class ConfigData:
     database: DatabaseConfig
     reliability: ReliabilityConfig
     conversion: ConversionConfig
+    csv_resolver: CsvResolverConfig
 
     misc: MiscConfig
-    csv_resolver: CsvResolverConfig = field(
-        default_factory=lambda: CsvResolverConfig(
-            search_inflight_per_provider=3,
-            metadata_inflight_per_provider=2,
-            url_inflight_per_provider=2,
-            provider_min_interval_seconds=0.2,
-            cooldown_base_seconds=10.0,
-            cooldown_max_seconds=120.0,
-            failure_streak_for_cooldown=4,
-            escalation_search_limit=15,
-        )
-    )
 
     _modified: bool = False
 
@@ -405,8 +394,8 @@ class ConfigData:
             cli=cli,
             database=database,
             reliability=reliability,
-            csv_resolver=csv_resolver,
             conversion=conversion,
+            csv_resolver=csv_resolver,
             misc=misc,
         )
 

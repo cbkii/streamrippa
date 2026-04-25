@@ -12,7 +12,7 @@ from __future__ import annotations
 import csv
 import json
 import re
-import shutil
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -74,47 +74,18 @@ def exportify_artist_group_key(row: ExportifyCsvRow) -> str:
 
 
 def backup_and_sort_exportify_csv(path: str) -> str:
-    """Create a deterministic backup then sort the CSV in-place by artist.
+    """Deprecated no-op.
 
-    Backup path: ``<stem>.original<suffix>`` in the same directory.
-    If it already exists, it is kept unchanged.
+    CSV imports now parse rows in-place and apply artist-aware batching in memory;
+    no ``.original.csv`` backup file is created.
     """
-    source = Path(path)
-    backup = source.with_name(f"{source.stem}.original{source.suffix}")
-    if not backup.exists():
-        shutil.copy2(source, backup)
-
-    with open(source, encoding="utf-8-sig", newline="") as fh:
-        reader = csv.DictReader(fh)
-        fieldnames = reader.fieldnames
-        rows = list(reader)
-
-    if not fieldnames:
-        return str(backup)
-
-    def _row_artist_key(record: dict[str, str]) -> str:
-        artists_raw = (record.get("Artist Name(s)") or "").strip()
-        first_artist = artists_raw.split(";")[0].strip() if artists_raw else ""
-        return _artist_sort_key(first_artist or artists_raw)
-
-    sorted_rows = sorted(
-        enumerate(rows),
-        key=lambda item: (
-            _row_artist_key(item[1]),
-            (item[1].get("Track Name") or "").casefold().strip(),
-            item[0],
-        ),
+    warnings.warn(
+        "backup_and_sort_exportify_csv is deprecated; CSV sorting/partitioning is "
+        "handled in-memory and no backup file is written.",
+        DeprecationWarning,
+        stacklevel=2,
     )
-
-    with open(source, "rb") as fh:
-        has_bom = fh.read(3) == b"\xef\xbb\xbf"
-    encoding = "utf-8-sig" if has_bom else "utf-8"
-    with open(source, "w", encoding=encoding, newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows([row for _, row in sorted_rows])
-
-    return str(backup)
+    return str(Path(path))
 
 
 def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:

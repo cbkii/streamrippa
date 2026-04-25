@@ -97,6 +97,16 @@ def test_set_downloaded_duplicate_counts_as_skipped():
     assert db.stats.skipped == 1
 
 
+def test_set_downloaded_count_stats_false_does_not_increment():
+    db = _make_db()
+    db.set_downloaded("111", source="qobuz", count_stats=False)
+    assert db.stats.succeeded == 0
+    assert db.stats.skipped == 0
+    db.set_downloaded("111", source="qobuz", count_stats=False)
+    assert db.stats.succeeded == 0
+    assert db.stats.skipped == 0
+
+
 # ---------------------------------------------------------------------------
 # Failed store and clear_failed
 # ---------------------------------------------------------------------------
@@ -148,6 +158,13 @@ def test_set_failed_validation_increments_validation_counter():
     db = _make_db_with_failed()
     db.set_failed("deezer", "track", "100", is_validation_failure=True)
     assert db.stats.validation_failures == 1
+    assert db.stats.failed == 1
+
+
+def test_set_failed_duplicate_does_not_double_count():
+    db = _make_db_with_failed()
+    db.set_failed("deezer", "track", "100")
+    db.set_failed("deezer", "track", "100")
     assert db.stats.failed == 1
 
 

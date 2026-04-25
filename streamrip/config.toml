@@ -118,21 +118,22 @@ bit_depth = 24
 lossy_bitrate = 320
 
 [csv_resolver]
-# Max in-flight search calls per provider during CSV resolve/repair runs
+# CSV resolver controls concurrency, rate limiting, and cooldowns for CSV resolve/repair provider calls.
+# Max in-flight search calls per provider (positive int; values <= 0 are clamped to 1). Default: 3.
 search_inflight_per_provider = 3
-# Max in-flight metadata calls per provider during CSV resolve/repair runs
+# Max in-flight metadata calls per provider (positive int; values <= 0 are clamped to 1). Default: 2.
 metadata_inflight_per_provider = 2
-# Max in-flight URL acquisition calls per provider during CSV download attempts
+# Max in-flight URL acquisition calls per provider (positive int; values <= 0 are clamped to 1). Default: 2.
 url_inflight_per_provider = 2
-# Minimum delay between provider API calls in CSV resolve/repair runs (seconds)
+# Minimum delay between provider API calls in seconds (non-negative float; 0 disables enforced delay). Default: 0.2.
 provider_min_interval_seconds = 0.2
-# Base cooldown after provider pressure/errors rise (seconds)
+# Base cooldown seconds after failure streak threshold is reached (non-negative float; clamped to >= 0). Default: 10.0.
 cooldown_base_seconds = 10.0
-# Maximum cooldown cap (seconds)
+# Maximum cooldown cap seconds (non-negative float; if lower than base, max cap is used as-is). Default: 120.0.
 cooldown_max_seconds = 120.0
-# Consecutive failures before provider cooldown opens
+# Consecutive failures before cooldown opens (positive int; <= 0 effectively disables failure-triggered cooldown). Default: 4.
 failure_streak_for_cooldown = 4
-# Search limit used for escalation lane (fast lane uses resolver defaults)
+# Search result limit for escalation lane (positive int; invalid/<=0 falls back to default 15; higher values increase provider load).
 escalation_search_limit = 15
 
 # Filter a Qobuz artist's discography. Set to 'true' to turn on a filter.

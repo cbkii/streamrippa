@@ -33,6 +33,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 from dataclasses import dataclass
 from time import monotonic
 
@@ -896,7 +897,6 @@ class PendingCsvTrack(Pending):
         """
         # Attempt download at the requested quality.
         # Pass exact_quality=True for Deezer so the caller controls stepping.
-        is_deezer = candidate.source == "deezer"
         try:
 
             async def _get_downloadable():
@@ -906,29 +906,23 @@ class PendingCsvTrack(Pending):
                 ):
                     async with self.provider_budgets[candidate.source].url_sem:
                         await self._provider_wait(candidate.source)
-                        if is_deezer:
+                        if candidate.source == "deezer":
                             return await candidate.client.get_downloadable(
                                 candidate.id, quality, exact_quality=True
                             )
                         return await candidate.client.get_downloadable(
                             candidate.id, quality
                         )
-                if is_deezer:
+                if candidate.source == "deezer":
                     return await candidate.client.get_downloadable(
                         candidate.id, quality, exact_quality=True
                     )
                 return await candidate.client.get_downloadable(candidate.id, quality)
 
-            if is_deezer:
-                embedded_cover_path, downloadable = await asyncio.gather(
-                    self._download_cover(cached.album.covers, candidate.client),
-                    _get_downloadable(),
-                )
-            else:
-                embedded_cover_path, downloadable = await asyncio.gather(
-                    self._download_cover(cached.album.covers, candidate.client),
-                    _get_downloadable(),
-                )
+            embedded_cover_path, downloadable = await asyncio.gather(
+                self._download_cover(cached.album.covers, candidate.client),
+                _get_downloadable(),
+            )
             self._provider_after_call(candidate.source, ok=True, err=None)
         except NonStreamableError as e:
             self._provider_after_call(candidate.source, ok=False, err=e)
@@ -1086,7 +1080,11 @@ class PendingCsvPlaylist(Pending):
         msg = str(err).lower() if err is not None else ""
         if "429" in msg or "too many" in msg:
             budget.rate_limited_count += 1
-        if "401" in msg or "unauthorized" in msg or "auth" in msg:
+        if (
+            "401" in msg
+            or "unauthorized" in msg
+            or re.search(r"\bauth(?:entication)?\b", msg, re.IGNORECASE)
+        ):
             budget.auth_error_count += 1
             if budget.auth_error_count >= 3:
                 budget.disabled = True
@@ -1380,11 +1378,7 @@ class PendingCsvPlaylist(Pending):
                 last_query = query
                 last_strategy = strategy
                 try:
-                    effective_limit = (
-                        escalation_limit
-                        if (escalation and self.repair_mode)
-                        else search_limit
-                    )
+                    effective_limit = escalation_limit if escalation else search_limit
                     cache_key = (client.source, query.casefold(), effective_limit)
                     if self.query_cache is not None and cache_key in self.query_cache:
                         pages = self.query_cache[cache_key]
@@ -1399,9 +1393,9 @@ class PendingCsvPlaylist(Pending):
                             pages = await client.search(
                                 "track", query, limit=effective_limit
                             )
+                        self._provider_after_call(client.source, ok=True, err=None)
                         if self.query_cache is not None:
                             self.query_cache[cache_key] = pages
-                    self._provider_after_call(client.source, ok=True, err=None)
                     top_candidates = _pick_top_candidates(
                         row,
                         client.source,
@@ -1471,14 +1465,23 @@ class PendingCsvPlaylist(Pending):
             fallback_outcome = await _resolve_for_client(
                 self.fallback_client, escalation=False
             )
-        if primary_outcome.candidate is None:
+        if (
+            primary_outcome.candidate is None
+            or primary_outcome.candidate.score < min_score
+        ):
             primary_outcome = await _resolve_for_client(
                 self.primary_client, escalation=True
             )
         if (
             self.fallback_client is not None
-            and fallback_outcome.candidate is None
-            and primary_outcome.candidate is None
+            and (
+                fallback_outcome.candidate is None
+                or fallback_outcome.candidate.score < min_score
+            )
+            and (
+                primary_outcome.candidate is None
+                or primary_outcome.candidate.score < min_score
+            )
         ):
             fallback_outcome = await _resolve_for_client(
                 self.fallback_client, escalation=True

@@ -245,8 +245,12 @@ class Track(Media):
         if actual_seconds < 45.0 and delta > 25.0:
             try:
                 os.remove(self.download_path)
-            except OSError:
-                pass
+            except OSError as e:
+                self.logger.warning(
+                    "Could not remove invalid download '%s': %s",
+                    self.download_path,
+                    e,
+                )
             self.db.set_failed(
                 self.downloadable.source,
                 "track",
@@ -257,6 +261,7 @@ class Track(Media):
                     f"Duration mismatch: got {actual_seconds:.1f}s, "
                     f"expected {expected_seconds:.1f}s"
                 ),
+                is_validation_failure=True,
             )
             raise DownloadError(
                 f"Rejected likely preview/wrong file for '{self.meta.title}'"

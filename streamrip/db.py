@@ -34,6 +34,12 @@ class DatabaseInterface(ABC):
 
     @abstractmethod
     def add(self, kvs) -> bool:
+        """Insert a row and report dedupe status.
+
+        Returns:
+            True when the INSERT succeeded (new row), False when it failed due to
+            ``sqlite3.IntegrityError`` (duplicate row).
+        """
         pass
 
     @abstractmethod
@@ -55,6 +61,12 @@ class Dummy(DatabaseInterface):
         return False
 
     def add(self, *_):
+        """Pretend insert succeeded for disabled-db/test paths.
+
+        Returns:
+            True when the INSERT succeeded (new row), False when it failed due to
+            ``sqlite3.IntegrityError`` (duplicate row).
+        """
         return True
 
     def remove(self, *_, **__):
@@ -127,6 +139,8 @@ class DatabaseBase(DatabaseInterface):
 
         :param items: Column-name + value. Values must be provided for all cols.
         :type items: Tuple[str]
+        :returns: ``True`` when INSERT succeeded (new row), ``False`` when
+            INSERT hit ``sqlite3.IntegrityError`` (duplicate row).
         """
         assert len(items) == len(self.structure)
 
@@ -394,8 +408,10 @@ class UnresolvedQueryLog:
             "source_row_index": (
                 row_index if source_row_index is None else source_row_index
             ),
-            "original_position": original_position if original_position else "",
-            "duration_ms": duration_ms if duration_ms else "",
+            "original_position": (
+                original_position if original_position is not None else ""
+            ),
+            "duration_ms": duration_ms if duration_ms is not None else "",
             "session_country": session_country,
             "query_strategy": query_strategy,
             "attempted_query": attempted_query,
@@ -478,6 +494,12 @@ class Database:
         """Record a failed download in the SQLite database and, if configured,
         append a row to the human-readable CSV log."""
         inserted = self.failed.add((source, media_type, id))
+        # Keep DB-backed failure stats deduped across retry/repair runs:
+        # self.failed tracks unique (source, media_type, id) keys and
+        # self.stats.failed should only advance on first insertion.
+        # By contrast, the CSV audit log intentionally appends every attempt for
+        # full traceability; that divergence is deliberate. validation_failures is
+        # incremented unconditionally by design whenever is_validation_failure=True.
         if inserted is not False:
             self.stats.failed += 1
         if is_validation_failure:

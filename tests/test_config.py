@@ -10,6 +10,7 @@ from streamrip.config import (
     Config,
     ConfigData,
     ConversionConfig,
+    CsvResolverConfig,
     DatabaseConfig,
     DeezerConfig,
     DownloadsConfig,
@@ -260,6 +261,16 @@ def test_sample_config_data_fields(sample_config_data):
             bit_depth=24,
             lossy_bitrate=320,
         ),
+        csv_resolver=CsvResolverConfig(
+            search_inflight_per_provider=3,
+            metadata_inflight_per_provider=2,
+            url_inflight_per_provider=2,
+            provider_min_interval_seconds=0.2,
+            cooldown_base_seconds=10.0,
+            cooldown_max_seconds=120.0,
+            failure_streak_for_cooldown=4,
+            escalation_search_limit=15,
+        ),
         misc=MiscConfig(version="2.0", check_for_updates=True),
         _modified=False,
     )
@@ -277,6 +288,7 @@ def test_sample_config_data_fields(sample_config_data):
     assert sample_config_data.database == test_config.database
     assert sample_config_data.reliability == test_config.reliability
     assert sample_config_data.conversion == test_config.conversion
+    assert sample_config_data.csv_resolver == test_config.csv_resolver
 
 
 def test_config_update_on_save():
