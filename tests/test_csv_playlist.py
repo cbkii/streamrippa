@@ -2161,6 +2161,7 @@ async def test_main_resolve_csv_rips_per_artist_batch_immediately():
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             _FakePendingCsvPlaylist.created += 1
             self.label = str(_FakePendingCsvPlaylist.created)
@@ -2228,6 +2229,7 @@ async def test_main_resolve_csv_continues_after_unresolved_batch():
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             _FakePendingCsvPlaylist.created += 1
             self.seq = _FakePendingCsvPlaylist.created
@@ -2301,6 +2303,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_rip_exception():
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             _FakePendingCsvPlaylist.created += 1
             self.seq = _FakePendingCsvPlaylist.created
@@ -2374,6 +2377,7 @@ async def test_main_resolve_csv_non_fail_fast_continues_after_rip_exception():
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             _FakePendingCsvPlaylist.created += 1
             self.seq = _FakePendingCsvPlaylist.created
@@ -2439,6 +2443,7 @@ async def test_main_resolve_csv_rip_exception_contributes_to_main_rip_failures()
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             self.rows = rows
 
@@ -2496,6 +2501,7 @@ async def test_main_resolve_csv_resolve_exception_contributes_to_main_rip_failur
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             self.rows = rows
 
@@ -2557,6 +2563,7 @@ async def test_main_resolve_csv_fail_fast_stops_after_resolve_exception():
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             _FakePendingCsvPlaylist.created += 1
             self.seq = _FakePendingCsvPlaylist.created
@@ -2626,6 +2633,7 @@ async def test_main_resolve_csv_uses_env_batch_size_override():
             config,
             db,
             repair_mode=False,
+            **kwargs,
         ):
             self.rows = rows
 

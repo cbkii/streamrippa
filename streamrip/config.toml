@@ -242,7 +242,8 @@ truncate_to = 120
 # Search provider/source key used for track lookup.
 source = "qobuz"
 # Fallback provider/source key used when primary has no usable result.
-# Recommended for CSV/repair flows: "deezer".
+# This applies to all Last.fm playlist resolution flows. For CSV-specific
+# workflows, [csv_resolver].default_fallback_source takes precedence.
 fallback_source = "deezer"
 
 [cli]

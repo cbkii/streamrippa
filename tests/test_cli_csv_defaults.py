@@ -44,3 +44,17 @@ def test_effective_csv_sources_falls_back_to_lastfm_then_safe_defaults():
     source, fallback = _effective_csv_sources(cfg_empty, None, None)
     assert source == "qobuz"
     assert fallback == "deezer"
+
+
+def test_effective_csv_sources_cli_equal_source_and_fallback_rewrites_fallback():
+    # When CLI passes the same value for both source and fallback,
+    # the guard should rewrite the fallback to avoid a no-op.
+    cfg = _cfg("", "", "", "")
+    source, fallback = _effective_csv_sources(cfg, "deezer", "deezer")
+    assert source == "deezer"
+    assert fallback == "qobuz"
+
+    # Same guard for the non-deezer case.
+    source2, fallback2 = _effective_csv_sources(cfg, "qobuz", "qobuz")
+    assert source2 == "qobuz"
+    assert fallback2 == "deezer"

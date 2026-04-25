@@ -48,6 +48,7 @@ from ..exceptions import NonStreamableError
 from ..file_lists import (
     ExportifyCsvRow,
     _artist_overlap,
+    _duration_match_with_tolerance,
     is_usable_exportify_row,
     score_candidate,
     score_candidate_repair,
@@ -214,28 +215,6 @@ def _item_duration_ms(source: str, item: dict) -> int | None:
     if parsed < 10000:
         parsed *= 1000
     return parsed if parsed > 0 else None
-
-
-def _duration_match_with_tolerance(
-    expected_ms: int | None,
-    actual_seconds: float | None,
-    *,
-    tolerance_ratio: float,
-    tolerance_seconds: float,
-) -> bool:
-    """CSV duration sanity check with hybrid tolerance and anti-preview guard."""
-    if expected_ms is None or expected_ms <= 0:
-        return True
-    if actual_seconds is None or actual_seconds <= 0:
-        # Best-effort only: inability to read duration should not fail resolution.
-        return True
-    expected_seconds = expected_ms / 1000.0
-    if actual_seconds < 45.0 and expected_seconds >= 90.0:
-        return False
-    allowed_delta = max(
-        float(tolerance_seconds), expected_seconds * float(tolerance_ratio)
-    )
-    return abs(actual_seconds - expected_seconds) <= allowed_delta
 
 
 def _first_artist(row: ExportifyCsvRow) -> str:
@@ -1139,6 +1118,8 @@ class PendingCsvPlaylist(Pending):
 
     def _build_local_index(self) -> None:
         """Build one deterministic local-file lookup index for this playlist run."""
+        if self.local_file_index is not None:
+            return
         csv_cfg = self._csv_cfg()
         if not bool(getattr(csv_cfg, "local_skip_enabled", False)):
             return
@@ -1175,6 +1156,8 @@ class PendingCsvPlaylist(Pending):
                     scanned += 1
                     for key in _file_local_lookup_keys(path):
                         index.setdefault(key, []).append(path)
+                if scanned >= max_scan:
+                    break
 
         for key in index:
             index[key] = sorted(index[key], key=lambda p: str(p))
@@ -1196,12 +1179,13 @@ class PendingCsvPlaylist(Pending):
             return self.local_duration_cache[key]
         try:
             from mutagen import File as MutagenFile
+            from mutagen import MutagenError
 
             info = MutagenFile(str(path))
             seconds = float(getattr(getattr(info, "info", None), "length", 0.0))
             self.local_duration_cache[key] = seconds if seconds > 0 else None
-        except Exception as e:
-            logger.debug("local-skip duration read failed for '%s': %s", path, e)
+        except (MutagenError, OSError, ValueError) as e:
+            logger.warning("local-skip duration read failed for '%s': %s", path, e)
             self.local_duration_cache[key] = None
         return self.local_duration_cache[key]
 
@@ -1221,7 +1205,11 @@ class PendingCsvPlaylist(Pending):
                 saw_ambiguous = True
                 continue
             for path in matches:
-                if require_duration and row.duration_ms:
+                if require_duration:
+                    if not row.duration_ms:
+                        # Duration check required but CSV row has no duration field:
+                        # don't accept as a local skip to respect user intent.
+                        continue
                     actual = self._duration_for_local_path(Path(path))
                     if not _duration_match_with_tolerance(
                         row.duration_ms,
@@ -1815,7 +1803,8 @@ class PendingCsvPlaylist(Pending):
             if low_candidates:
                 if (
                     len(low_candidates) > 1
-                    and low_candidates[0].id != low_candidates[1].id
+                    and (low_candidates[0].source, low_candidates[0].id)
+                    != (low_candidates[1].source, low_candidates[1].id)
                     and abs(low_candidates[0].score - low_candidates[1].score) <= 3
                 ):
                     logger.warning(

@@ -272,6 +272,17 @@ For each CSV row, streamrip:
 
 **Rerunning is safe** — tracks already in the download database or on disk are skipped automatically.
 
+**Source and fallback defaults:**
+
+`[lastfm].source` and `[lastfm].fallback_source` are used as global defaults for all Last.fm playlist resolution flows, not only CSV workflows. For CSV imports and repair, `[csv_resolver].default_source` / `[csv_resolver].default_fallback_source` take precedence over the `[lastfm]` values. The full precedence is:
+
+```
+CLI --source/--fallback-source
+  > [csv_resolver].default_source / default_fallback_source
+  > [lastfm].source / fallback_source
+  > safe defaults (qobuz / deezer)
+```
+
 **Optional local prefilter (opt-in):**
 
 Enable `[csv_resolver].local_skip_enabled = true` to pre-scan local files and skip

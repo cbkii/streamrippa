@@ -308,8 +308,8 @@ async def url(ctx, urls):
     default="auto",
     help=(
         "File list mode. 'auto' tries JSON, then Exportify CSV, then URL list. "
-        "'exportify-csv' requires --source (search provider/source). "
-        "Defaults are config-driven."
+        "For 'exportify-csv', --source/--fallback-source are optional and "
+        "default to [csv_resolver] / [lastfm] config values."
     ),
     show_default=True,
 )

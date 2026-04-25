@@ -439,6 +439,7 @@ class Main:
         shared_query_cache: dict[tuple[str, str, int], list[dict]] | None = None
         shared_negative_candidate_cache: dict[tuple[str, str], str] | None = None
         shared_provider_budgets = None
+        shared_local_file_index = None
         # Keep a defensive fallback because tests patch PendingCsvPlaylist with fakes
         # that may not define the resolver-specific fail-fast exception type.
         fail_fast_abort_type = getattr(PendingCsvPlaylist, "FailFastAbortError", None)
@@ -447,54 +448,21 @@ class Main:
             logger.info(
                 "Resolving CSV batch %d/%d (%d rows)", idx, len(batches), len(batch)
             )
-            try:
-                pending_playlist = PendingCsvPlaylist(
-                    playlist_name=playlist_name,
-                    rows=batch,
-                    primary_client=primary_client,
-                    fallback_client=fallback_client,
-                    config=self.config,
-                    db=self.database,
-                    repair_mode=repair_mode,
-                    accept_lowscore=accept_lowscore,
-                    lowscore_floor=lowscore_floor,
-                    query_cache=shared_query_cache,
-                    negative_candidate_cache=shared_negative_candidate_cache,
-                    provider_budgets=shared_provider_budgets,
-                )
-            except TypeError:
-                try:
-                    pending_playlist = PendingCsvPlaylist(
-                        playlist_name=playlist_name,
-                        rows=batch,
-                        primary_client=primary_client,
-                        fallback_client=fallback_client,
-                        config=self.config,
-                        db=self.database,
-                        repair_mode=repair_mode,
-                    )
-                except TypeError:
-                    pending_playlist = PendingCsvPlaylist(
-                        playlist_name,
-                        batch,
-                        primary_client,
-                        fallback_client,
-                        self.config,
-                        self.database,
-                        repair_mode,
-                    )
-                if hasattr(pending_playlist, "query_cache"):
-                    pending_playlist.query_cache = shared_query_cache
-                if hasattr(pending_playlist, "negative_candidate_cache"):
-                    pending_playlist.negative_candidate_cache = (
-                        shared_negative_candidate_cache
-                    )
-                if hasattr(pending_playlist, "provider_budgets"):
-                    pending_playlist.provider_budgets = shared_provider_budgets
-                if hasattr(pending_playlist, "accept_lowscore"):
-                    pending_playlist.accept_lowscore = accept_lowscore
-                if hasattr(pending_playlist, "lowscore_floor"):
-                    pending_playlist.lowscore_floor = lowscore_floor
+            pending_playlist = PendingCsvPlaylist(
+                playlist_name=playlist_name,
+                rows=batch,
+                primary_client=primary_client,
+                fallback_client=fallback_client,
+                config=self.config,
+                db=self.database,
+                repair_mode=repair_mode,
+                accept_lowscore=accept_lowscore,
+                lowscore_floor=lowscore_floor,
+                query_cache=shared_query_cache,
+                negative_candidate_cache=shared_negative_candidate_cache,
+                provider_budgets=shared_provider_budgets,
+                local_file_index=shared_local_file_index,
+            )
 
             failures_before = self.database.stats.failed
             try:
@@ -505,6 +473,9 @@ class Main:
                     pending_playlist, "negative_candidate_cache", None
                 )
                 shared_provider_budgets = budgets
+                shared_local_file_index = getattr(
+                    pending_playlist, "local_file_index", None
+                )
                 if budgets is not None:
                     for provider, budget in budgets.items():
                         metrics = provider_health.setdefault(
