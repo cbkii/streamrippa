@@ -5,7 +5,7 @@ import functools
 import logging
 import os
 import shutil
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import click
@@ -121,6 +121,26 @@ class ReliabilityConfig:
     # Verify downloaded FLAC files for integrity using mutagen.
     # Corrupt files are removed and recorded in the failed-downloads log.
     validate_flac: bool
+
+
+@dataclass(slots=True)
+class CsvResolverConfig:
+    # Max in-flight search calls per provider during CSV resolution
+    search_inflight_per_provider: int
+    # Max in-flight metadata calls per provider during CSV resolution
+    metadata_inflight_per_provider: int
+    # Max in-flight URL acquisition calls per provider during CSV download attempts
+    url_inflight_per_provider: int
+    # Minimum delay between provider API calls (seconds)
+    provider_min_interval_seconds: float
+    # Base cooldown window (seconds) when provider pressure/errors rise
+    cooldown_base_seconds: float
+    # Max cooldown cap (seconds)
+    cooldown_max_seconds: float
+    # Consecutive failures before opening cooldown/circuit
+    failure_streak_for_cooldown: int
+    # Extra search limit used by escalation lane
+    escalation_search_limit: int
 
 
 @dataclass(slots=True)
@@ -290,6 +310,18 @@ class ConfigData:
     conversion: ConversionConfig
 
     misc: MiscConfig
+    csv_resolver: CsvResolverConfig = field(
+        default_factory=lambda: CsvResolverConfig(
+            search_inflight_per_provider=3,
+            metadata_inflight_per_provider=2,
+            url_inflight_per_provider=2,
+            provider_min_interval_seconds=0.2,
+            cooldown_base_seconds=10.0,
+            cooldown_max_seconds=120.0,
+            failure_streak_for_cooldown=4,
+            escalation_search_limit=15,
+        )
+    )
 
     _modified: bool = False
 
@@ -349,6 +381,12 @@ class ConfigData:
             "conversion",
             ConversionConfig,
         )
+        csv_resolver = _build_dataclass_config(
+            toml,
+            default_toml,
+            "csv_resolver",
+            CsvResolverConfig,
+        )
         misc = _build_dataclass_config(toml, default_toml, "misc", MiscConfig)
 
         return cls(
@@ -367,6 +405,7 @@ class ConfigData:
             cli=cli,
             database=database,
             reliability=reliability,
+            csv_resolver=csv_resolver,
             conversion=conversion,
             misc=misc,
         )
@@ -398,6 +437,7 @@ class ConfigData:
         update_toml_section_from_config(self.toml["cli"], self.cli)
         update_toml_section_from_config(self.toml["database"], self.database)
         update_toml_section_from_config(self.toml["reliability"], self.reliability)
+        update_toml_section_from_config(self.toml["csv_resolver"], self.csv_resolver)
         update_toml_section_from_config(self.toml["conversion"], self.conversion)
 
     def get_source(
@@ -417,8 +457,8 @@ class ConfigData:
 
 
 def update_toml_section_from_config(toml_section, config):
-    for field in fields(config):
-        toml_section[field.name] = getattr(config, field.name)
+    for config_field in fields(config):
+        toml_section[config_field.name] = getattr(config, config_field.name)
 
 
 def _build_dataclass_config(
@@ -434,11 +474,11 @@ def _build_dataclass_config(
     user_section = user_toml[section]
     default_section = default_toml[section]
     data = {}
-    for field in fields(config_cls):
-        if field.name in user_section:
-            data[field.name] = user_section[field.name]
+    for config_field in fields(config_cls):
+        if config_field.name in user_section:
+            data[config_field.name] = user_section[config_field.name]
         else:
-            data[field.name] = copy.deepcopy(default_section[field.name])
+            data[config_field.name] = copy.deepcopy(default_section[config_field.name])
     return config_cls(**data)
 
 

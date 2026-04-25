@@ -13,6 +13,7 @@ import csv
 import json
 import re
 import shutil
+from collections import defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -49,6 +50,12 @@ class ExportifyCsvRow:
     position: int
     # 0-based index of this row in the file (for deterministic logging)
     row_index: int
+    # Immutable 0-based index from the original source CSV order
+    source_row_index: int = 0
+    # Canonical/stripped title used for query fallback and scoring
+    canonical_track_name: str = ""
+    # Exportify "Duration (ms)" column when present
+    duration_ms: int | None = None
     # Optional provider-ID hints from unresolved CSV logs: {source: track_id}
     repair_candidate_ids: dict[str, str] | None = None
 
@@ -138,10 +145,20 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
                 position = i + 1
 
             isrc = (row.get("ISRC") or row.get("Track ISRC") or "").strip()
+            duration_ms: int | None = None
+            try:
+                duration_raw = (row.get("Duration (ms)") or "").strip()
+                if duration_raw:
+                    parsed_duration = int(duration_raw)
+                    if parsed_duration > 0:
+                        duration_ms = parsed_duration
+            except (ValueError, TypeError):
+                duration_ms = None
+            track_name = (row.get("Track Name") or "").strip()
 
             rows.append(
                 ExportifyCsvRow(
-                    track_name=(row.get("Track Name") or "").strip(),
+                    track_name=track_name,
                     artists_raw=artists_raw,
                     artists_list=artists_list,
                     album=(row.get("Album Name") or "").strip(),
@@ -153,6 +170,9 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
                     tempo=(row.get("Tempo") or "").strip(),
                     position=position,
                     row_index=i,
+                    source_row_index=i,
+                    canonical_track_name=strip_title_decorators(track_name),
+                    duration_ms=duration_ms,
                 )
             )
 
@@ -167,23 +187,22 @@ def partition_exportify_rows_artist_batched(
     if max_batch_size < 1:
         raise ValueError("max_batch_size must be >= 1")
 
+    groups: dict[str, list[ExportifyCsvRow]] = defaultdict(list)
+    for row in rows:
+        key = exportify_artist_group_key(row)
+        if row.album:
+            key = f"{key}::{_normalise_variant_text(row.album)}"
+        groups[key].append(row)
+
+    ordered_group_keys = sorted(groups.keys())
     batches: list[list[ExportifyCsvRow]] = []
     current: list[ExportifyCsvRow] = []
-    i = 0
-    total = len(rows)
-
-    while i < total:
-        group_key = exportify_artist_group_key(rows[i])
-        j = i + 1
-        while j < total and exportify_artist_group_key(rows[j]) == group_key:
-            j += 1
-        group = rows[i:j]
-
+    for key in ordered_group_keys:
+        group = sorted(groups[key], key=lambda r: (r.source_row_index, r.row_index))
         current.extend(group)
         if len(current) >= max_batch_size:
             batches.append(current)
             current = []
-        i = j
 
     if current:
         batches.append(current)
@@ -262,6 +281,12 @@ def strip_title_decorators(title: str) -> str:
     # Drop trailing "- Remaster/Live/Edit/Version/Mono/Stereo/Deluxe..." suffixes.
     stripped = re.sub(
         r"\s*[-\u2013—:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"\s*[-\u2013—:]\s*(?:acoustic|live|session|mix|version|edit|remaster(?:ed)?|unplugged)\b.*$",
         "",
         stripped,
         flags=re.IGNORECASE,
@@ -390,6 +415,7 @@ def score_candidate(
     candidate_album: str,
     candidate_date: str,
     candidate_isrc: str,
+    candidate_duration_ms: int | None = None,
 ) -> int:
     """
     Score how well a search-result candidate matches a CSV row from an Exportify export.
@@ -458,6 +484,14 @@ def score_candidate(
 
     score += _year_bonus(row.release_date, candidate_date)
     score -= _variant_penalty(row.track_name, candidate_title)
+    if row.duration_ms and candidate_duration_ms:
+        delta = abs(row.duration_ms - candidate_duration_ms)
+        if delta <= 2500:
+            score += 8
+        elif delta <= 6000:
+            score += 4
+        elif delta >= 25000:
+            score -= 16
 
     return max(score, 1)
 
@@ -469,6 +503,7 @@ def score_candidate_repair(
     candidate_album: str,
     candidate_date: str,
     candidate_isrc: str,
+    candidate_duration_ms: int | None = None,
 ) -> int:
     """Extended scoring for repair-mode candidate matching.
 
@@ -494,6 +529,7 @@ def score_candidate_repair(
         candidate_album,
         candidate_date,
         candidate_isrc,
+        candidate_duration_ms,
     )
     if std > 0:
         return std
@@ -545,9 +581,23 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
             artists_list = [a.strip() for a in artists_raw.split(";") if a.strip()]
 
             try:
-                position = int(row.get("row_index") or i) + 1
+                source_row_index = int(
+                    row.get("source_row_index") or row.get("row_index") or i
+                )
+            except (ValueError, TypeError):
+                source_row_index = i
+            try:
+                position = int(
+                    row.get("original_position")
+                    or row.get("position")
+                    or source_row_index + 1
+                )
             except (ValueError, TypeError):
                 position = i + 1
+            try:
+                duration_ms = int((row.get("duration_ms") or "").strip() or 0) or None
+            except (ValueError, TypeError):
+                duration_ms = None
 
             repair_candidate_ids: dict[str, str] | None = None
             primary_source = (row.get("primary_source") or "").strip()
@@ -574,7 +624,12 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
                     loudness="",
                     tempo="",
                     position=position,
-                    row_index=i,
+                    row_index=source_row_index,
+                    source_row_index=source_row_index,
+                    canonical_track_name=strip_title_decorators(
+                        (row.get("track_name") or "").strip()
+                    ),
+                    duration_ms=duration_ms,
                     repair_candidate_ids=repair_candidate_ids,
                 )
             )

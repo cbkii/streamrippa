@@ -117,6 +117,24 @@ bit_depth = 24
 # Only applicable for lossy codecs
 lossy_bitrate = 320
 
+[csv_resolver]
+# Max in-flight search calls per provider during CSV resolve/repair runs
+search_inflight_per_provider = 3
+# Max in-flight metadata calls per provider during CSV resolve/repair runs
+metadata_inflight_per_provider = 2
+# Max in-flight URL acquisition calls per provider during CSV download attempts
+url_inflight_per_provider = 2
+# Minimum delay between provider API calls in CSV resolve/repair runs (seconds)
+provider_min_interval_seconds = 0.2
+# Base cooldown after provider pressure/errors rise (seconds)
+cooldown_base_seconds = 10.0
+# Maximum cooldown cap (seconds)
+cooldown_max_seconds = 120.0
+# Consecutive failures before provider cooldown opens
+failure_streak_for_cooldown = 4
+# Search limit used for escalation lane (fast lane uses resolver defaults)
+escalation_search_limit = 15
+
 # Filter a Qobuz artist's discography. Set to 'true' to turn on a filter.
 # This will also be applied to other sources, but is not guaranteed to work correctly
 [qobuz_filters]

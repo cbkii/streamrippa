@@ -12,7 +12,9 @@ class _MemoryDb:
         self._data: set[str] = set()
 
     def add(self, item: tuple):
+        before = len(self._data)
         self._data.add(item[0])
+        return len(self._data) > before
 
     def contains(self, **kwargs) -> bool:
         return kwargs.get("id", "") in self._data
@@ -87,6 +89,14 @@ def test_stats_increment_on_set_downloaded():
     assert db.stats.succeeded == 1
 
 
+def test_set_downloaded_duplicate_counts_as_skipped():
+    db = _make_db()
+    db.set_downloaded("111", source="qobuz")
+    db.set_downloaded("111", source="qobuz")
+    assert db.stats.succeeded == 1
+    assert db.stats.skipped == 1
+
+
 # ---------------------------------------------------------------------------
 # Failed store and clear_failed
 # ---------------------------------------------------------------------------
@@ -99,7 +109,9 @@ class _MemoryFailedDb:
         self._data: set[tuple[str, str, str]] = set()
 
     def add(self, item: tuple):
+        before = len(self._data)
         self._data.add(item)
+        return len(self._data) > before
 
     def contains(self, **kwargs) -> bool:
         key = (

@@ -115,6 +115,9 @@ def test_parse_basic_row():
         assert row.tempo == "120.3"
         assert row.position == 1
         assert row.row_index == 0
+        assert row.source_row_index == 0
+        assert row.duration_ms == 337800
+        assert row.canonical_track_name == "Blue in Green"
     finally:
         os.unlink(path)
 
@@ -402,6 +405,14 @@ def test_strip_title_decorators_removes_feat_and_remaster_suffixes():
     assert strip_title_decorators("1, 2 Step (feat. Missy Elliott)") == "1, 2 Step"
     assert strip_title_decorators("Song Name - 2011 Remaster") == "Song Name"
     assert strip_title_decorators("Song Name \u2013 2011 Remaster") == "Song Name"
+    assert (
+        strip_title_decorators("Layla - Acoustic; Live at MTV Unplugged; 2013 Remaster")
+        == "Layla"
+    )
+    assert (
+        strip_title_decorators("Bug Powder Dust - Kruder & Dorfmeister Session")
+        == "Bug Powder Dust - Kruder & Dorfmeister Session"
+    )
 
 
 def test_score_featured_title_matches_plain_canonical_title():

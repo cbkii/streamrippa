@@ -428,6 +428,7 @@ class Main:
         )
         fail_fast = self.config.session.reliability.fail_fast
         top_level_failures = 0
+        provider_health: dict[str, dict[str, int]] = {}
         # Keep a defensive fallback because tests patch PendingCsvPlaylist with fakes
         # that may not define the resolver-specific fail-fast exception type.
         fail_fast_abort_type = getattr(PendingCsvPlaylist, "FailFastAbortError", None)
@@ -449,6 +450,20 @@ class Main:
             failures_before = self.database.stats.failed
             try:
                 playlist = await pending_playlist.resolve()
+                budgets = getattr(pending_playlist, "provider_budgets", None)
+                if budgets is not None:
+                    for source, budget in budgets.items():
+                        metrics = provider_health.setdefault(
+                            source,
+                            {
+                                "cooldowns": 0,
+                                "rate_limited": 0,
+                                "auth_errors": 0,
+                            },
+                        )
+                        metrics["cooldowns"] += budget.cooldown_count
+                        metrics["rate_limited"] += budget.rate_limited_count
+                        metrics["auth_errors"] += budget.auth_error_count
                 if playlist is None:
                     continue
 
@@ -471,6 +486,15 @@ class Main:
                 break
 
         self._csv_top_level_failures += top_level_failures
+        if provider_health:
+            for source, metrics in provider_health.items():
+                logger.info(
+                    "CSV provider health %s: cooldowns=%d, rate_limited=%d, auth_errors=%d",
+                    source,
+                    metrics["cooldowns"],
+                    metrics["rate_limited"],
+                    metrics["auth_errors"],
+                )
 
         if self.database.unresolved_log and self.database.unresolved_log.has_entries:
             console.print(

@@ -33,7 +33,7 @@ class DatabaseInterface(ABC):
         pass
 
     @abstractmethod
-    def add(self, kvs):
+    def add(self, kvs) -> bool:
         pass
 
     @abstractmethod
@@ -55,7 +55,7 @@ class Dummy(DatabaseInterface):
         return False
 
     def add(self, *_):
-        pass
+        return True
 
     def remove(self, *_, **__):
         pass
@@ -122,7 +122,7 @@ class DatabaseBase(DatabaseInterface):
 
             return bool(conn.execute(command, tuple(items.values())).fetchone()[0])
 
-    def add(self, items: tuple[str]):
+    def add(self, items: tuple[str]) -> bool:
         """Add a row to the table.
 
         :param items: Column-name + value. Values must be provided for all cols.
@@ -140,9 +140,9 @@ class DatabaseBase(DatabaseInterface):
         with sqlite3.connect(self.path) as conn:
             try:
                 conn.execute(command, tuple(items))
-            except sqlite3.IntegrityError as e:
-                # tried to insert an item that was already there
-                logger.debug(e)
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def remove(self, **items):
         """Remove items from a table.
@@ -282,6 +282,9 @@ class UnresolvedQueryLog:
         "fallback_candidate_id",
         "reason",
         "row_index",
+        "source_row_index",
+        "original_position",
+        "duration_ms",
         "session_country",
         "query_strategy",
         "attempted_query",
@@ -342,6 +345,9 @@ class UnresolvedQueryLog:
         fallback_source: str,
         reason: str,
         row_index: int,
+        source_row_index: int | None = None,
+        original_position: int | None = None,
+        duration_ms: int | None = None,
         primary_candidate_id: str = "",
         fallback_candidate_id: str = "",
         session_country: str = "",
@@ -385,6 +391,11 @@ class UnresolvedQueryLog:
             "fallback_candidate_id": fallback_candidate_id,
             "reason": reason,
             "row_index": row_index,
+            "source_row_index": (
+                row_index if source_row_index is None else source_row_index
+            ),
+            "original_position": original_position if original_position else "",
+            "duration_ms": duration_ms if duration_ms else "",
             "session_country": session_country,
             "query_strategy": query_strategy,
             "attempted_query": attempted_query,
@@ -422,15 +433,26 @@ class Database:
                 return True
         return self.downloads.contains(id=item_id)
 
-    def set_downloaded(self, item_id: str, source: str | None = None):
+    def set_downloaded(
+        self,
+        item_id: str,
+        source: str | None = None,
+        *,
+        count_stats: bool = True,
+    ):
         """Record that an item has been downloaded.
 
         When *source* is provided the key written is ``"source:id"`` so
         that different sources with colliding numeric IDs do not interfere.
         """
         key = f"{source}:{item_id}" if source else item_id
-        self.downloads.add((key,))
-        self.stats.succeeded += 1
+        inserted = self.downloads.add((key,))
+        if not count_stats:
+            return
+        if inserted is False:
+            self.stats.skipped += 1
+        else:
+            self.stats.succeeded += 1
 
     def set_skipped(self):
         """Increment the skipped counter (track already downloaded or file exists)."""
@@ -455,8 +477,9 @@ class Database:
     ):
         """Record a failed download in the SQLite database and, if configured,
         append a row to the human-readable CSV log."""
-        self.failed.add((source, media_type, id))
-        self.stats.failed += 1
+        inserted = self.failed.add((source, media_type, id))
+        if inserted is not False:
+            self.stats.failed += 1
         if is_validation_failure:
             self.stats.validation_failures += 1
         if self.failed_log is not None:

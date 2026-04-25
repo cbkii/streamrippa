@@ -30,6 +30,7 @@ class Track(Media):
     # change?
     download_path: str = ""
     is_single: bool = False
+    expected_duration_ms: int | None = None
 
     async def rip(self):
         await self.preprocess()
@@ -44,9 +45,8 @@ class Track(Media):
             )
             src = getattr(self.downloadable, "source", None)
             if not self.db.downloaded(self.meta.info.id, source=src):
-                self.db.set_downloaded(self.meta.info.id, source=src)
-            else:
-                self.db.set_skipped()
+                self.db.set_downloaded(self.meta.info.id, source=src, count_stats=False)
+            self.db.set_skipped()
             if self.is_single:
                 remove_title(self.meta.title)
             return
@@ -156,6 +156,7 @@ class Track(Media):
             remove_title(self.meta.title)
 
         await tag_file(self.download_path, self.meta, self.cover_path)
+        await self._validate_expected_duration()
 
         # Validate FLAC integrity if enabled and the output file is FLAC
         if (
@@ -219,6 +220,47 @@ class Track(Media):
         )
         await engine.convert()
         self.download_path = engine.final_fn  # because the extension changed
+
+    async def _validate_expected_duration(self):
+        """Best-effort duration sanity check for CSV-resolved tracks.
+
+        Reject obvious preview/wrong-length files (e.g., ~30-second snippets)
+        when the source CSV provides an expected duration.
+        """
+        if not self.expected_duration_ms:
+            return
+        try:
+            from mutagen import File as MutagenFile
+
+            info = MutagenFile(self.download_path)
+            actual_seconds = float(getattr(getattr(info, "info", None), "length", 0.0))
+        except Exception as e:
+            logger.debug("Could not validate duration for '%s': %s", self.meta.title, e)
+            return
+
+        if actual_seconds <= 0:
+            return
+        expected_seconds = self.expected_duration_ms / 1000.0
+        delta = abs(actual_seconds - expected_seconds)
+        if actual_seconds < 45.0 and delta > 25.0:
+            try:
+                os.remove(self.download_path)
+            except OSError:
+                pass
+            self.db.set_failed(
+                self.downloadable.source,
+                "track",
+                self.meta.info.id,
+                title=self.meta.title,
+                artist=self.meta.artist,
+                error=(
+                    f"Duration mismatch: got {actual_seconds:.1f}s, "
+                    f"expected {expected_seconds:.1f}s"
+                ),
+            )
+            raise DownloadError(
+                f"Rejected likely preview/wrong file for '{self.meta.title}'"
+            )
 
     def _set_download_path(self):
         c = self.config.session.filepaths

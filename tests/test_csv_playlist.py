@@ -63,7 +63,9 @@ class _MemoryDb:
         self._data: set[str] = set()
 
     def add(self, item):
+        before = len(self._data)
         self._data.add(item[0])
+        return len(self._data) > before
 
     def contains(self, **kwargs) -> bool:
         return kwargs.get("id", "") in self._data
@@ -228,6 +230,13 @@ def test_build_search_queries_adds_stripped_title_variant_for_decorated_rows():
     assert any("1, 2 Step Ciara" in query for _, query in queries)
 
 
+def test_build_search_queries_dedupes_identical_normalized_queries():
+    row = _make_row(title="Song", artists=["Artist"])
+    queries = _build_search_queries(row, "qobuz", escalation=True)
+    query_texts = [q.casefold() for _, q in queries]
+    assert len(query_texts) == len(set(query_texts))
+
+
 # ---------------------------------------------------------------------------
 # _pick_best_candidate
 # ---------------------------------------------------------------------------
@@ -291,6 +300,41 @@ def test_pick_best_candidate_title_artist_match():
     cand = _pick_best_candidate(row, "qobuz", pages, client)
     assert cand is not None
     assert cand.score >= 60
+
+
+def test_pick_best_candidate_prefers_duration_match():
+    row = _make_row(title="Layla", artists=["Eric Clapton"])
+    row.duration_ms = 290000
+    client = _make_client("qobuz")
+    pages = [
+        {
+            "tracks": {
+                "items": [
+                    {
+                        "id": 1,
+                        "title": "Layla",
+                        "performer": {"name": "Eric Clapton"},
+                        "album": {"title": "Unplugged"},
+                        "isrc": "",
+                        "release_date_original": "1992",
+                        "duration": 290,
+                    },
+                    {
+                        "id": 2,
+                        "title": "Layla",
+                        "performer": {"name": "Eric Clapton"},
+                        "album": {"title": "Unplugged"},
+                        "isrc": "",
+                        "release_date_original": "1992",
+                        "duration": 360,
+                    },
+                ]
+            }
+        }
+    ]
+    cand = _pick_best_candidate(row, "qobuz", pages, client)
+    assert cand is not None
+    assert cand.id == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +801,53 @@ async def test_pending_csv_playlist_batches_resolver():
 
     finally:
         csv_mod._RESOLVER_BATCH_SIZE = original_batch_size
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_query_cache_avoids_duplicate_search_calls():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(return_value=[])
+
+    rows = [
+        _make_row(title="Song", artists=["Artist"], row_index=0),
+        _make_row(title="Song", artists=["Artist"], row_index=1),
+    ]
+
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=rows,
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    await pending.resolve()
+
+    # Each unique query should be requested at most once and reused for the second row.
+    assert primary_client.search.await_count <= 8
+
+
+@pytest.mark.asyncio
+async def test_pending_csv_playlist_disables_provider_after_repeated_auth_errors():
+    db = _make_db()
+    cfg = _make_config()
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(side_effect=Exception("401 unauthorized"))
+
+    rows = [_make_row(row_index=i) for i in range(6)]
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=rows,
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    await pending.resolve()
+    assert pending.provider_budgets is not None
+    assert pending.provider_budgets["qobuz"].disabled is True
 
 
 @pytest.mark.asyncio
