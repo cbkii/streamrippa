@@ -784,3 +784,36 @@ def test_isrc_bad_context_allowed_for_karaoke_row():
         "USTEST123456",
     )
     assert score == 100
+
+
+def test_radio_edit_alias_still_detected():
+    """Removing the bare 'edit' alias must not break detection of genuine radio edits."""
+    row = _make_row(title="My Song", artists=["Artist A"])
+    reject_policy = MatchPolicy(radio_edit_mode="reject")
+    # Candidate is "My Song - Radio Edit" → should still be detected and rejected
+    score = score_candidate(
+        row,
+        "My Song - Radio Edit",
+        "Artist A",
+        "",
+        "",
+        "",
+        policy=reject_policy,
+    )
+    assert score == 0
+
+
+def test_remix_alias_still_detected():
+    """Removing the bare 'mix' alias must not break detection of genuine remixes."""
+    row = _make_row(title="My Song", artists=["Artist A"])
+    # Candidate is "My Song Club Remix" → 'remix' alias should still flag it
+    # and since 'remix' defaults to 'reject', it should be rejected when unexpected
+    score = score_candidate(
+        row,
+        "My Song Club Remix",
+        "Artist A",
+        "",
+        "",
+        "",
+    )
+    assert score == 0

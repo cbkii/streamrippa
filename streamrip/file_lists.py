@@ -352,6 +352,11 @@ _BAD_CONTEXT_MARKERS: tuple[str, ...] = (
     "sped up",
     "reverb",
 )
+# Variants that allow a bad-context candidate to still be accepted when the
+# CSV row itself explicitly requests one of these types.
+_BAD_CONTEXT_CARVEOUT_VARIANTS: frozenset[str] = frozenset(
+    {"karaoke", "tribute", "commentary"}
+)
 _CORE_STRIP_MARKERS: frozenset[str] = frozenset(
     {
         "live",
@@ -571,7 +576,7 @@ def score_candidate(
             ):
                 row_title_parsed = _parse_title(row.track_name)
                 if not row_title_parsed.variants.intersection(
-                    {"karaoke", "tribute", "commentary"}
+                    _BAD_CONTEXT_CARVEOUT_VARIANTS
                 ):
                     return 0
             return 100
@@ -595,7 +600,7 @@ def score_candidate(
         and policy.reject_bad_context_releases
         and _contains_bad_context(candidate_title, candidate_album, candidate_artist)
     ):
-        if not row_title.variants.intersection({"karaoke", "tribute", "commentary"}):
+        if not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS):
             return 0
 
     score = 27
