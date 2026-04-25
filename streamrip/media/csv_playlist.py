@@ -48,6 +48,7 @@ from ..db import Database
 from ..exceptions import NonStreamableError
 from ..file_lists import (
     ExportifyCsvRow,
+    MatchPolicy,
     _artist_overlap,
     _duration_match_with_tolerance,
     is_usable_exportify_row,
@@ -376,6 +377,7 @@ def _pick_best_candidate(
     best_item = None
     best_score = -1
 
+    policy = MatchPolicy()
     for item in items:
         title = _item_title(source, item)
         artist = _item_artist(source, item)
@@ -391,6 +393,7 @@ def _pick_best_candidate(
             date,
             isrc,
             _item_duration_ms(source, item),
+            policy=policy,
         )
         if sc > best_score:
             best_score = sc
@@ -430,6 +433,7 @@ def _pick_best_candidate_repair(
     best_item = None
     best_score = -1
 
+    policy = MatchPolicy()
     for item in items:
         title = _item_title(source, item)
         artist = _item_artist(source, item)
@@ -445,6 +449,7 @@ def _pick_best_candidate_repair(
             date,
             isrc,
             _item_duration_ms(source, item),
+            policy=policy,
         )
         if sc > best_score:
             best_score = sc
@@ -482,11 +487,13 @@ def _pick_top_candidates(
     *,
     repair_mode: bool,
     limit: int = _SHORTLIST_K,
+    policy: MatchPolicy | None = None,
 ) -> list[TrackCandidate]:
     items = _extract_raw_results(source, pages)
     if not items:
         return []
     scored: list[TrackCandidate] = []
+    active_policy = policy or MatchPolicy()
     seen_ids: set[str] = set()
     for item in items:
         item_id = str(item.get("id", "")).strip()
@@ -500,9 +507,27 @@ def _pick_top_candidates(
         isrc = _item_isrc(source, item)
         duration_ms = _item_duration_ms(source, item)
         score = (
-            score_candidate_repair(row, title, artist, album, date, isrc, duration_ms)
+            score_candidate_repair(
+                row,
+                title,
+                artist,
+                album,
+                date,
+                isrc,
+                duration_ms,
+                policy=active_policy,
+            )
             if repair_mode
-            else score_candidate(row, title, artist, album, date, isrc, duration_ms)
+            else score_candidate(
+                row,
+                title,
+                artist,
+                album,
+                date,
+                isrc,
+                duration_ms,
+                policy=active_policy,
+            )
         )
         if score <= 0:
             continue
@@ -1563,6 +1588,7 @@ class PendingCsvPlaylist(Pending):
                 row.track_name,
                 local_reason,
             )
+        match_policy = MatchPolicy.from_config(self._csv_cfg())
 
         async def _resolve_for_client(
             client: Client,
@@ -1621,6 +1647,7 @@ class PendingCsvPlaylist(Pending):
                                 _item_date(client.source, hinted_resp),
                                 _item_isrc(client.source, hinted_resp),
                                 _item_duration_ms(client.source, hinted_resp),
+                                policy=match_policy,
                             )
                             if self.repair_mode
                             else score_candidate(
@@ -1631,6 +1658,7 @@ class PendingCsvPlaylist(Pending):
                                 _item_date(client.source, hinted_resp),
                                 _item_isrc(client.source, hinted_resp),
                                 _item_duration_ms(client.source, hinted_resp),
+                                policy=match_policy,
                             )
                         ),
                         client=client,
@@ -1686,6 +1714,7 @@ class PendingCsvPlaylist(Pending):
                         client,
                         repair_mode=self.repair_mode,
                         limit=_SHORTLIST_K,
+                        policy=match_policy,
                     )
                 except Exception as e:
                     self._provider_after_call(client.source, ok=False, err=e)

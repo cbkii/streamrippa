@@ -162,6 +162,22 @@ class CsvResolverConfig:
     local_skip_duration_tolerance_seconds: int
     # Safety cap for number of files scanned into local-skip index.
     local_skip_max_file_scan: int
+    # Enable structured variant-aware policy in CSV candidate scoring.
+    variant_policy_enabled: bool
+    # Policy for unexpected candidate "live" markers: equivalent|penalty|reject
+    live_mode: str
+    # Policy for unexpected candidate "acoustic" markers: equivalent|penalty|reject
+    acoustic_mode: str
+    # Policy for unexpected candidate "instrumental" markers: equivalent|penalty|reject
+    instrumental_mode: str
+    # Policy for unexpected candidate "radio_edit"/"single_edit": equivalent|penalty|reject
+    radio_edit_mode: str
+    # Policy for unexpected candidate "remaster" markers: equivalent|penalty|reject
+    remaster_mode: str
+    # Ignore year mismatch penalties when remaster markers are expected/present.
+    year_ignore_for_remaster: bool
+    # Reject obvious junk-context releases (karaoke, tribute, commentary, etc.)
+    reject_bad_context_releases: bool
 
 
 @dataclass(slots=True)

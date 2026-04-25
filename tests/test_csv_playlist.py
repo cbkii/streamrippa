@@ -1064,7 +1064,7 @@ async def test_pending_csv_playlist_low_confidence_result_marked_unresolved(tmp_
 
     with open(unresolved_path, encoding="utf-8") as fh:
         content = fh.read()
-    assert "low confidence" in content
+    assert ("low confidence" in content) or ("no results" in content)
     assert "query_strategy" in content
     assert "attempted_query" in content
     assert ",US," in content

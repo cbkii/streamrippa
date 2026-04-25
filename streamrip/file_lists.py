@@ -60,6 +60,45 @@ class ExportifyCsvRow:
     repair_candidate_ids: dict[str, str] | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ParsedTitle:
+    original: str
+    normalized: str
+    core_title: str
+    variants: frozenset[str]
+
+
+@dataclass(slots=True)
+class MatchPolicy:
+    enabled: bool = True
+    live_mode: str = "reject"
+    acoustic_mode: str = "reject"
+    instrumental_mode: str = "reject"
+    radio_edit_mode: str = "penalty"
+    remaster_mode: str = "equivalent"
+    year_ignore_for_remaster: bool = True
+    reject_bad_context_releases: bool = True
+
+    @classmethod
+    def from_config(cls, config) -> "MatchPolicy":
+        if config is None:
+            return cls()
+        return cls(
+            enabled=bool(getattr(config, "variant_policy_enabled", True)),
+            live_mode=str(getattr(config, "live_mode", "reject")),
+            acoustic_mode=str(getattr(config, "acoustic_mode", "reject")),
+            instrumental_mode=str(getattr(config, "instrumental_mode", "reject")),
+            radio_edit_mode=str(getattr(config, "radio_edit_mode", "penalty")),
+            remaster_mode=str(getattr(config, "remaster_mode", "equivalent")),
+            year_ignore_for_remaster=bool(
+                getattr(config, "year_ignore_for_remaster", True)
+            ),
+            reject_bad_context_releases=bool(
+                getattr(config, "reject_bad_context_releases", True)
+            ),
+        )
+
+
 def _artist_sort_key(value: str) -> str:
     """Normalize artist text for deterministic sorting/grouping."""
     value = value.casefold().strip()
@@ -277,19 +316,61 @@ def _artist_overlap(query_artists: list[str], result_artist: str) -> bool:
     return False
 
 
-_VARIANT_MARKERS: frozenset[str] = frozenset(
+_VARIANT_ALIASES: dict[str, tuple[str, ...]] = {
+    "live": ("live", "live at", "in concert"),
+    "acoustic": ("acoustic", "unplugged"),
+    "instrumental": ("instrumental",),
+    "radio_edit": ("radio edit", "radio mix", "single edit", "short version", "edit"),
+    "remaster": ("remaster", "remastered", "anniversary remaster"),
+    "remix": ("remix", "mix"),
+    "demo": ("demo",),
+    "explicit": ("explicit",),
+    "clean": ("clean",),
+    "mono": ("mono",),
+    "stereo": ("stereo",),
+    "orchestral": ("orchestral", "orchestra version"),
+    "session": ("session", "take"),
+    "rehearsal": ("rehearsal",),
+    "commentary": ("commentary",),
+    "karaoke": ("karaoke", "instrumental karaoke"),
+    "tribute": ("tribute", "made famous by"),
+    "slowed_sped": ("slowed", "sped up", "reverb"),
+}
+_BAD_CONTEXT_MARKERS: tuple[str, ...] = (
+    "karaoke",
+    "tribute",
+    "made famous by",
+    "commentary",
+    "podcast",
+    "audiobook",
+    "lullaby",
+    "meditation",
+    "workout",
+    "8d audio",
+    "nightcore",
+    "slowed",
+    "sped up",
+    "reverb",
+)
+_CORE_STRIP_MARKERS: frozenset[str] = frozenset(
     {
         "live",
+        "acoustic",
+        "instrumental",
+        "radio edit",
+        "single edit",
+        "edit",
         "remaster",
         "remastered",
-        "deluxe",
-        "radio edit",
-        "edit",
-        "explicit",
-        "clean",
         "mono",
         "stereo",
+        "explicit",
+        "clean",
         "version",
+        "mix",
+        "demo",
+        "session",
+        "unplugged",
         "bonus track",
         "feat",
         "featuring",
@@ -299,24 +380,13 @@ _VARIANT_MARKERS: frozenset[str] = frozenset(
 
 
 def _normalise_variant_text(s: str) -> str:
-    """
-    Normalize a track/album title and remove common edition/version markers and standalone year tokens.
-
-    Performs the same normalization as _normalise, then strips known variant markers (e.g. "live", "remaster", "feat") when they appear as standalone words and removes standalone four-digit years starting with 19 or 20. Collapses repeated whitespace and returns an empty string if the resulting text is empty.
-
-    Parameters:
-        s (str): Input text to normalise.
-
-    Returns:
-        str: Normalised text with variant markers and standalone year tokens removed.
-    """
+    """Normalize and remove common variant markers for coarse fallback matching."""
     norm = _normalise(strip_title_decorators(s))
     if not norm:
         return ""
-    # Remove known variant markers and standalone year tags.
     marker_pattern = "|".join(
         sorted(
-            (re.escape(marker) for marker in _VARIANT_MARKERS), key=len, reverse=True
+            (re.escape(marker) for marker in _CORE_STRIP_MARKERS), key=len, reverse=True
         )
     )
     norm = re.sub(rf"\b(?:{marker_pattern})\b", "", norm)
@@ -364,19 +434,87 @@ def _year_bonus(row_date: str, candidate_date: str) -> int:
     return 0
 
 
-def _variant_penalty(row_title: str, candidate_title: str) -> int:
-    row_norm = _normalise(row_title)
-    cand_norm = _normalise(candidate_title)
-    if not row_norm or not cand_norm:
-        return 0
+def _extract_variant_markers(text: str) -> frozenset[str]:
+    norm = _normalise(text)
+    if not norm:
+        return frozenset()
+    markers: list[str] = []
+    for canonical, aliases in _VARIANT_ALIASES.items():
+        if any(re.search(rf"\b{re.escape(alias)}\b", norm) for alias in aliases):
+            markers.append(canonical)
+    return frozenset(sorted(markers))
 
+
+def _parse_title(text: str) -> ParsedTitle:
+    norm = _normalise(text or "")
+    markers = _extract_variant_markers(text or "")
+    core = _normalise_variant_text(text or "")
+    if not core:
+        core = norm
+    return ParsedTitle(
+        original=text or "",
+        normalized=norm,
+        core_title=core,
+        variants=markers,
+    )
+
+
+def _contains_bad_context(title: str, album: str, artist: str) -> bool:
+    full = _normalise(" ".join([title or "", album or "", artist or ""]))
+    if not full:
+        return False
+    return any(
+        re.search(rf"\b{re.escape(marker)}\b", full) for marker in _BAD_CONTEXT_MARKERS
+    )
+
+
+def _variant_mode(policy: MatchPolicy, marker: str) -> str:
+    if marker == "live":
+        return policy.live_mode
+    if marker == "acoustic":
+        return policy.acoustic_mode
+    if marker == "instrumental":
+        return policy.instrumental_mode
+    if marker == "radio_edit":
+        return policy.radio_edit_mode
+    if marker == "remaster":
+        return policy.remaster_mode
+    # Other material variants default to reject unless explicitly expected by source.
+    if marker in {"remix", "demo", "orchestral", "session", "rehearsal"}:
+        return "reject"
+    # explicit/clean/mono/stereo are near-equivalent.
+    if marker in {"explicit", "clean", "mono", "stereo"}:
+        return "equivalent"
+    return "penalty"
+
+
+def _variant_policy_penalty(
+    expected: frozenset[str],
+    candidate: frozenset[str],
+    policy: MatchPolicy,
+) -> tuple[int, bool]:
+    if not policy.enabled:
+        return 0, False
     penalty = 0
-    for marker in _VARIANT_MARKERS:
-        in_row = marker in row_norm
-        in_cand = marker in cand_norm
-        if in_row != in_cand:
-            penalty += 4
-    return min(penalty, 16)
+    reject = False
+    unexpected = sorted(v for v in candidate if v not in expected)
+    missing_expected = sorted(v for v in expected if v not in candidate)
+
+    for marker in unexpected:
+        mode = _variant_mode(policy, marker)
+        if mode == "reject":
+            reject = True
+        elif mode == "penalty":
+            penalty += 8
+
+    for marker in missing_expected:
+        # Expected variant absent in candidate is a strong mismatch.
+        mode = _variant_mode(policy, marker)
+        if mode in {"reject", "penalty"}:
+            penalty += 10
+            if marker in {"live", "acoustic", "instrumental", "remix", "demo"}:
+                reject = True
+    return penalty, reject
 
 
 def score_candidate(
@@ -387,6 +525,7 @@ def score_candidate(
     candidate_date: str,
     candidate_isrc: str,
     candidate_duration_ms: int | None = None,
+    policy: MatchPolicy | None = None,
 ) -> int:
     """
     Score how well a search-result candidate matches a CSV row from an Exportify export.
@@ -408,61 +547,109 @@ def score_candidate(
     Returns:
         int: Numeric match score. `100` indicates exact ISRC match; `0` indicates no title match; otherwise a positive score (at least `1`) representing match strength.
     """
-    # ISRC match is definitive
+    policy = policy or MatchPolicy()
+
     if row.isrc and candidate_isrc:
         if row.isrc.upper() == candidate_isrc.upper():
+            # ISRC still requires sane identity context to avoid absurd mismatches.
+            if _contains_bad_context(
+                candidate_title, candidate_album, candidate_artist
+            ):
+                return 0
             return 100
 
-    norm_title = _normalise(row.track_name)
-    norm_cand = _normalise(candidate_title)
-    if not norm_title or not norm_cand:
+    row_title = _parse_title(row.track_name)
+    cand_title = _parse_title(candidate_title)
+    if not row_title.normalized or not cand_title.normalized:
         return 0
 
-    # Strong title requirement first; this keeps generic text search as fallback
-    # but prevents unrelated tracks from winning on weak metadata overlap.
-    titles_match = norm_title == norm_cand
-    row_variant_title = _normalise_variant_text(row.track_name)
-    candidate_variant_title = _normalise_variant_text(candidate_title)
-    variant_titles_match = (
-        bool(row_variant_title)
-        and bool(candidate_variant_title)
-        and row_variant_title == candidate_variant_title
+    exact_title = row_title.normalized == cand_title.normalized
+    core_title_match = (
+        bool(row_title.core_title)
+        and bool(cand_title.core_title)
+        and row_title.core_title == cand_title.core_title
     )
-
-    if not titles_match and not variant_titles_match:
+    if not exact_title and not core_title_match:
         return 0
 
-    score = 42
-    if titles_match:
+    if policy.reject_bad_context_releases and _contains_bad_context(
+        candidate_title, candidate_album, candidate_artist
+    ):
+        if not row_title.variants.intersection({"karaoke", "tribute", "commentary"}):
+            return 0
+
+    score = 38
+    if exact_title:
+        score += 10
+    if core_title_match:
         score += 8
 
     coverage = _artist_coverage(row.artists_list, candidate_artist)
     if coverage >= 1.0:
-        score += 24
+        score += 26
     elif coverage >= 0.5:
         score += 14
     elif _artist_overlap(row.artists_list, candidate_artist):
         score += 8
+    else:
+        weak_context = False
+        if row.album and candidate_album and core_title_match:
+            row_album_norm = _normalise_variant_text(row.album)
+            cand_album_norm = _normalise_variant_text(candidate_album)
+            weak_context = bool(
+                row_album_norm
+                and cand_album_norm
+                and (
+                    row_album_norm == cand_album_norm
+                    or row_album_norm in cand_album_norm
+                    or cand_album_norm in row_album_norm
+                )
+            )
+        if not weak_context:
+            return 0
+        score -= 10
 
     if row.album and candidate_album:
         row_album = _normalise_variant_text(row.album)
         cand_album = _normalise_variant_text(candidate_album)
         if row_album and cand_album:
             if row_album == cand_album:
-                score += 10
+                score += 4
             elif row_album in cand_album or cand_album in row_album:
-                score += 6
+                score += 2
 
-    score += _year_bonus(row.release_date, candidate_date)
-    score -= _variant_penalty(row.track_name, candidate_title)
+    row_has_remaster = "remaster" in row_title.variants
+    cand_has_remaster = "remaster" in cand_title.variants
+    if not (
+        policy.year_ignore_for_remaster and (row_has_remaster or cand_has_remaster)
+    ):
+        score += _year_bonus(row.release_date, candidate_date)
+
+    variant_penalty, reject_variant = _variant_policy_penalty(
+        row_title.variants,
+        cand_title.variants,
+        policy,
+    )
+    if reject_variant and row_title.variants != cand_title.variants:
+        return 0
+    if row_title.variants and row_title.variants.issubset(cand_title.variants):
+        score += 8
+    score -= variant_penalty
+
     if row.duration_ms and candidate_duration_ms:
         delta = abs(row.duration_ms - candidate_duration_ms)
         if delta <= 2500:
-            score += 8
+            score += 10
         elif delta <= 6000:
             score += 4
+        elif delta <= 12000:
+            score += 1
         elif delta >= 25000:
-            score -= 16
+            return 0
+        elif delta >= 15000:
+            score -= 14
+        else:
+            score -= 6
 
     return max(score, 1)
 
@@ -475,6 +662,7 @@ def score_candidate_repair(
     candidate_date: str,
     candidate_isrc: str,
     candidate_duration_ms: int | None = None,
+    policy: MatchPolicy | None = None,
 ) -> int:
     """Extended scoring for repair-mode candidate matching.
 
@@ -501,6 +689,7 @@ def score_candidate_repair(
         candidate_date,
         candidate_isrc,
         candidate_duration_ms,
+        policy=policy,
     )
     if std > 0:
         return std
