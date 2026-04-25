@@ -539,6 +539,9 @@ def _contains_bad_context_fields(
     *,
     bad_context_fields: tuple[str, ...],
 ) -> bool:
+    # "version", "subtitle", and "display_title" are all facets of the
+    # track title field in different provider schemas; they share the same
+    # backing value so the deduplication loop below avoids scanning it twice.
     field_values: dict[str, str] = {
         "title": candidate_title,
         "album": candidate_album,
@@ -1031,31 +1034,36 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
             override_fallback_id = (
                 row.get("override_fallback_candidate_id") or ""
             ).strip()
+            _track_name_hint = (row.get("track_name") or "").strip()
+
+            def _warn_incomplete_override(kind: str, src: str, cand_id: str) -> None:
+                logger.warning(
+                    "Row %d (%r): incomplete %s override "
+                    "(override_%s_source=%r, override_%s_candidate_id=%r); "
+                    "ignoring override and keeping original %s fields",
+                    source_row_index,
+                    _track_name_hint,
+                    kind,
+                    kind,
+                    src,
+                    kind,
+                    cand_id,
+                    kind,
+                )
+
             if override_primary_source and override_primary_id:
                 primary_source = override_primary_source
                 primary_candidate_id = override_primary_id
             elif override_primary_source or override_primary_id:
-                logger.warning(
-                    "Row %d (%r): incomplete primary override "
-                    "(override_primary_source=%r, override_primary_candidate_id=%r); "
-                    "ignoring override and keeping original primary fields",
-                    source_row_index,
-                    (row.get("track_name") or "").strip(),
-                    override_primary_source,
-                    override_primary_id,
+                _warn_incomplete_override(
+                    "primary", override_primary_source, override_primary_id
                 )
             if override_fallback_source and override_fallback_id:
                 fallback_source = override_fallback_source
                 fallback_candidate_id = override_fallback_id
             elif override_fallback_source or override_fallback_id:
-                logger.warning(
-                    "Row %d (%r): incomplete fallback override "
-                    "(override_fallback_source=%r, override_fallback_candidate_id=%r); "
-                    "ignoring override and keeping original fallback fields",
-                    source_row_index,
-                    (row.get("track_name") or "").strip(),
-                    override_fallback_source,
-                    override_fallback_id,
+                _warn_incomplete_override(
+                    "fallback", override_fallback_source, override_fallback_id
                 )
             if primary_source and primary_candidate_id:
                 repair_candidate_ids = {primary_source: primary_candidate_id}
