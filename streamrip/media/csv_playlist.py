@@ -365,6 +365,7 @@ def _pick_best_candidate(
     source: str,
     pages: list[dict],
     client: Client,
+    policy: MatchPolicy | None = None,
 ) -> TrackCandidate | None:
     """Score all results from *pages* and return the best :class:`TrackCandidate`.
 
@@ -377,7 +378,7 @@ def _pick_best_candidate(
     best_item = None
     best_score = -1
 
-    policy = MatchPolicy()
+    effective_policy = policy or MatchPolicy()
     for item in items:
         title = _item_title(source, item)
         artist = _item_artist(source, item)
@@ -393,7 +394,7 @@ def _pick_best_candidate(
             date,
             isrc,
             _item_duration_ms(source, item),
-            policy=policy,
+            policy=effective_policy,
         )
         if sc > best_score:
             best_score = sc
@@ -420,6 +421,7 @@ def _pick_best_candidate_repair(
     source: str,
     pages: list[dict],
     client: Client,
+    policy: MatchPolicy | None = None,
 ) -> TrackCandidate | None:
     """Legacy repair helper retained for compatibility/tests.
 
@@ -433,7 +435,7 @@ def _pick_best_candidate_repair(
     best_item = None
     best_score = -1
 
-    policy = MatchPolicy()
+    effective_policy = policy or MatchPolicy()
     for item in items:
         title = _item_title(source, item)
         artist = _item_artist(source, item)
@@ -449,7 +451,7 @@ def _pick_best_candidate_repair(
             date,
             isrc,
             _item_duration_ms(source, item),
-            policy=policy,
+            policy=effective_policy,
         )
         if sc > best_score:
             best_score = sc
@@ -1629,7 +1631,16 @@ class PendingCsvPlaylist(Pending):
 
             if hinted_id and not escalation:
                 try:
-                    hinted_resp = await client.get_metadata(hinted_id, "track")
+                    if (
+                        self.provider_budgets is not None
+                        and client.source in self.provider_budgets
+                    ):
+                        async with self.provider_budgets[client.source].metadata_sem:
+                            await self._provider_wait(client.source)
+                            hinted_resp = await client.get_metadata(hinted_id, "track")
+                    else:
+                        hinted_resp = await client.get_metadata(hinted_id, "track")
+                    self._provider_after_call(client.source, ok=True, err=None)
                     hinted_candidate = TrackCandidate(
                         source=client.source,
                         id=str(hinted_resp.get("id", hinted_id)),
@@ -1673,6 +1684,7 @@ class PendingCsvPlaylist(Pending):
                         )
                     best_low_conf = (hinted_id, "id-hint", hinted_candidate)
                 except Exception as e:
+                    self._provider_after_call(client.source, ok=False, err=e)
                     logger.debug(
                         "Hinted metadata lookup failed on %s id=%s: %s",
                         client.source,

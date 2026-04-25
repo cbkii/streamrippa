@@ -512,7 +512,16 @@ def _variant_policy_penalty(
         mode = _variant_mode(policy, marker)
         if mode in {"reject", "penalty"}:
             penalty += 10
-            if marker in {"live", "acoustic", "instrumental", "remix", "demo"}:
+            if marker in {
+                "live",
+                "acoustic",
+                "instrumental",
+                "remix",
+                "demo",
+                "orchestral",
+                "session",
+                "rehearsal",
+            }:
                 reject = True
     return penalty, reject
 
@@ -533,7 +542,7 @@ def score_candidate(
     Uses deterministic heuristics combining ISRC, title, artist, album and release year:
     - Exact ISRC match yields 100.
     - Requires either exact normalised title match or exact normalised-variant title match to produce a non-zero score.
-    - Base score for title match is 42, with bonuses for exact normalised title, artist coverage, album match, and year; penalties for variant/edition mismatches.
+    - Base score for title match is 27, with bonuses for exact normalised title, artist coverage, album match, and year; penalties for variant/edition mismatches.
     - Minimum positive score for matching titles is 1.
 
     Parameters:
@@ -572,13 +581,15 @@ def score_candidate(
     if not exact_title and not core_title_match:
         return 0
 
-    if policy.reject_bad_context_releases and _contains_bad_context(
-        candidate_title, candidate_album, candidate_artist
+    if (
+        policy.enabled
+        and policy.reject_bad_context_releases
+        and _contains_bad_context(candidate_title, candidate_album, candidate_artist)
     ):
         if not row_title.variants.intersection({"karaoke", "tribute", "commentary"}):
             return 0
 
-    score = 38
+    score = 27
     if exact_title:
         score += 10
     if core_title_match:
@@ -621,7 +632,9 @@ def score_candidate(
     row_has_remaster = "remaster" in row_title.variants
     cand_has_remaster = "remaster" in cand_title.variants
     if not (
-        policy.year_ignore_for_remaster and (row_has_remaster or cand_has_remaster)
+        policy.enabled
+        and policy.year_ignore_for_remaster
+        and (row_has_remaster or cand_has_remaster)
     ):
         score += _year_bonus(row.release_date, candidate_date)
 
@@ -681,6 +694,7 @@ def score_candidate_repair(
     ISRC match still short-circuits to 100 (handled inside
     :func:`score_candidate`).
     """
+    policy = policy or MatchPolicy()
     std = score_candidate(
         row,
         candidate_title,
@@ -714,6 +728,23 @@ def score_candidate_repair(
     if row.release_date and candidate_date:
         if row.release_date[:4] == str(candidate_date)[:4]:
             score += 5
+
+    # Re-apply policy rejections so the fuzzy path cannot bypass them.
+    if policy.enabled:
+        row_parsed = _parse_title(row.track_name)
+        cand_parsed = _parse_title(candidate_title)
+        _, reject_variant = _variant_policy_penalty(
+            row_parsed.variants, cand_parsed.variants, policy
+        )
+        if reject_variant and row_parsed.variants != cand_parsed.variants:
+            return 0
+        if policy.reject_bad_context_releases and _contains_bad_context(
+            candidate_title, candidate_album, candidate_artist
+        ):
+            if not row_parsed.variants.intersection(
+                {"karaoke", "tribute", "commentary"}
+            ):
+                return 0
 
     return score
 
