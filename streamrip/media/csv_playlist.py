@@ -34,6 +34,7 @@ import logging
 import os
 import random
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -100,8 +101,8 @@ class _ProviderBudget:
 async def _budgeted_get_raw_metadata(
     candidate: "TrackCandidate",
     provider_budgets: "dict[str, _ProviderBudget] | None",
-    provider_wait_fn,
-    provider_after_call_fn,
+    provider_wait_fn: Callable[[str], Awaitable[None]],
+    provider_after_call_fn: Callable[[str, bool, Exception | None], None],
 ) -> dict:
     """Fetch raw track metadata for *candidate* honouring provider semaphores and cooldowns.
 
@@ -1833,12 +1834,14 @@ class PendingCsvPlaylist(Pending):
             and self.repair_mode
             and self.accept_lowscore
         ):
-            _gathered = await asyncio.gather(
+            gathered_results = await asyncio.gather(
                 _guarded_low_score_candidate(primary_outcome),
                 _guarded_low_score_candidate(fallback_outcome),
                 return_exceptions=True,
             )
-            low_candidates = [c for c in _gathered if isinstance(c, TrackCandidate)]
+            low_candidates = [
+                c for c in gathered_results if isinstance(c, TrackCandidate)
+            ]
             if low_candidates:
                 if (
                     len(low_candidates) > 1
