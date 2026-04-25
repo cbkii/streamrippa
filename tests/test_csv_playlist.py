@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -698,6 +699,80 @@ async def test_pending_csv_track_skips_if_fallback_already_downloaded():
     assert result is None
     mock_fetch.assert_not_called()
     assert db.stats.skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_try_candidate_with_meta_cover_failure_is_best_effort():
+    """Cover-download errors must not fail an otherwise valid downloadable."""
+    db = _make_db()
+    cfg = _make_config()
+    client = _make_client("qobuz")
+    client.get_downloadable = AsyncMock(return_value=MagicMock())
+    candidate = _make_candidate("qobuz", client, id="qobuz_id")
+    track = PendingCsvTrack(
+        row=_make_row(),
+        primary_candidate=candidate,
+        fallback_candidate=None,
+        primary_qualities=[2],
+        fallback_qualities=[],
+        primary_source="qobuz",
+        fallback_source="",
+        config=cfg,
+        folder="/tmp/test",
+        playlist_name="Playlist",
+        position=1,
+        db=db,
+    )
+    cached = _CandidateMeta(
+        resp={},
+        album=MagicMock(covers=MagicMock()),
+        meta=MagicMock(),
+    )
+
+    with patch.object(
+        PendingCsvTrack,
+        "_download_cover",
+        new=AsyncMock(side_effect=RuntimeError("cover timeout")),
+    ):
+        resolved_track, status = await track._try_candidate_with_meta(
+            candidate, cached, quality=2
+        )
+
+    assert status == "ok"
+    assert resolved_track is not None
+
+
+def test_provider_budget_config_clamps_and_disables_cooldown_with_zero_threshold():
+    cfg = _make_config()
+    cfg.session.csv_resolver = SimpleNamespace(
+        search_inflight_per_provider=0,
+        metadata_inflight_per_provider=0,
+        url_inflight_per_provider=0,
+        provider_min_interval_seconds=-1,
+        cooldown_base_seconds=0,
+        cooldown_max_seconds=0,
+        failure_streak_for_cooldown=0,
+    )
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[_make_row()],
+        primary_client=_make_client("qobuz"),
+        fallback_client=None,
+        config=cfg,
+        db=_make_db(),
+    )
+    pending._init_provider_budgets()
+    assert pending.provider_budgets is not None
+    budget = pending.provider_budgets["qobuz"]
+    assert budget.search_sem._value == 1
+    assert budget.metadata_sem._value == 1
+    assert budget.url_sem._value == 1
+
+    pending._provider_after_call("qobuz", ok=False, err=Exception("timeout"))
+    # threshold=0 disables cooldown opening; failure streak remains accumulated.
+    assert budget.cooldown_count == 0
+    assert budget.cooldown_until_ts == 0.0
+    assert budget.failure_streak == 1
 
 
 @pytest.mark.asyncio

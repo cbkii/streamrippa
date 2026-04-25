@@ -922,7 +922,18 @@ class PendingCsvTrack(Pending):
             embedded_cover_path, downloadable = await asyncio.gather(
                 self._download_cover(cached.album.covers, candidate.client),
                 _get_downloadable(),
+                return_exceptions=True,
             )
+            if isinstance(downloadable, Exception):
+                raise downloadable
+            if isinstance(embedded_cover_path, Exception):
+                logger.warning(
+                    "Could not download cover for %s:%s: %s",
+                    candidate.source,
+                    candidate.id,
+                    embedded_cover_path,
+                )
+                embedded_cover_path = None
             self._provider_after_call(candidate.source, ok=True, err=None)
         except NonStreamableError as e:
             self._provider_after_call(candidate.source, ok=False, err=e)
@@ -1031,7 +1042,7 @@ class PendingCsvPlaylist(Pending):
                 return default
 
         def _int_cfg(name: str, default: int) -> int:
-            val = _coerce_int(getattr(csv_cfg, name, default) or default, default)
+            val = _coerce_int(getattr(csv_cfg, name, default), default)
             return max(1, val)
 
         search_limit = _int_cfg("search_inflight_per_provider", 3)
@@ -1066,12 +1077,27 @@ class PendingCsvPlaylist(Pending):
             return
         budget = self.provider_budgets[source]
         csv_cfg = self._csv_cfg()
-        try:
-            min_interval = float(
-                getattr(csv_cfg, "provider_min_interval_seconds", 0.2) or 0
-            )
-        except (TypeError, ValueError):
-            min_interval = 0.2
+
+        def _coerce_float(value, default: float) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _coerce_int(value, default: int) -> int:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        min_interval = max(
+            0.0,
+            _coerce_float(getattr(csv_cfg, "provider_min_interval_seconds", 0.2), 0.2),
+        )
         budget.next_allowed_ts = max(budget.next_allowed_ts, monotonic()) + min_interval
         if ok:
             budget.failure_streak = 0
@@ -1088,20 +1114,17 @@ class PendingCsvPlaylist(Pending):
             budget.auth_error_count += 1
             if budget.auth_error_count >= 3:
                 budget.disabled = True
-        try:
-            threshold = int(getattr(csv_cfg, "failure_streak_for_cooldown", 4) or 4)
-        except (TypeError, ValueError):
-            threshold = 4
+        threshold = _coerce_int(getattr(csv_cfg, "failure_streak_for_cooldown", 4), 4)
+        if threshold <= 0:
+            return
         if budget.failure_streak < threshold:
             return
-        try:
-            base = float(getattr(csv_cfg, "cooldown_base_seconds", 10.0) or 10.0)
-        except (TypeError, ValueError):
-            base = 10.0
-        try:
-            cap = float(getattr(csv_cfg, "cooldown_max_seconds", 120.0) or 120.0)
-        except (TypeError, ValueError):
-            cap = 120.0
+        base = max(
+            0.0, _coerce_float(getattr(csv_cfg, "cooldown_base_seconds", 10.0), 10.0)
+        )
+        cap = max(
+            0.0, _coerce_float(getattr(csv_cfg, "cooldown_max_seconds", 120.0), 120.0)
+        )
         cooldown = min(cap, base * (2 ** max(budget.cooldown_count, 0)))
         cooldown += random.uniform(0.0, 1.0)
         budget.cooldown_until_ts = monotonic() + cooldown
