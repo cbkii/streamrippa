@@ -17,9 +17,11 @@ import os
 import re
 import warnings
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 logger = logging.getLogger("streamrip")
@@ -393,7 +395,17 @@ _BAD_CONTEXT_PATTERN: re.Pattern[str] = re.compile(
 class CandidateExplanation:
     score: int
     reason_codes: tuple[str, ...]
-    signals: dict[str, object]
+    signals: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        # Wrap signals in a MappingProxyType to prevent callers from mutating
+        # the "immutable" explanation after construction.  A shallow copy is
+        # taken first so the caller's original dict is not aliased.
+        object.__setattr__(
+            self,
+            "signals",
+            MappingProxyType(dict(self.signals)),
+        )
 
 
 _CORE_STRIP_MARKERS: frozenset[str] = frozenset(
@@ -501,13 +513,6 @@ def _parse_title(text: str) -> ParsedTitle:
         core_title=core,
         variants=markers,
     )
-
-
-def _contains_bad_context(title: str, album: str, artist: str) -> bool:
-    full = _normalise(" ".join([title or "", album or "", artist or ""]))
-    if not full:
-        return False
-    return bool(_BAD_CONTEXT_PATTERN.search(full))
 
 
 @functools.lru_cache(maxsize=64)
@@ -754,6 +759,11 @@ def _score_candidate_internal(
         score += 8
     if guarded_fuzzy_match:
         score += 6
+        # NOTE: `reasons` accumulates only on the accept path.  Rejection
+        # branches (e.g. reject_artist_mismatch, reject_duration_far) return
+        # their own single-element reason_codes, so signals such as
+        # "title_fuzzy_guarded" may be True in telemetry without a corresponding
+        # accept reason code.
         reasons.append("accepted_guarded_fuzzy")
 
     coverage = _artist_coverage(row.artists_list, candidate_artist)
@@ -853,10 +863,14 @@ def score_candidate(
     """
     Score how well a search-result candidate matches a CSV row from an Exportify export.
 
-    Uses deterministic heuristics combining ISRC, title, artist, album and release year:
+    Uses deterministic heuristics combining ISRC, title, artist, album, duration and release year:
     - Exact ISRC match yields 100.
-    - Requires either exact normalised title match or exact normalised-variant title match to produce a non-zero score.
+    - Requires either an exact normalised title match, an exact normalised-variant
+      ("core") title match, or — when ``policy.enable_guarded_fuzzy_normal`` is
+      true — a guarded fuzzy normalised-title match (similarity ≥ 0.90 plus
+      artist overlap and album/duration agreement) to produce a non-zero score.
     - Base score for title match is 27, with bonuses for exact normalised title, artist coverage, album match, and year; penalties for variant/edition mismatches.
+    - ``candidate_duration_ms`` is used for album/duration agreement in the guarded-fuzzy path and for duration-mismatch penalties.
     - Minimum positive score for matching titles is 1.
 
     Parameters:
@@ -866,6 +880,7 @@ def score_candidate(
         candidate_album (str): Candidate album string to compare.
         candidate_date (str): Candidate release date string to compare for year bonus.
         candidate_isrc (str): Candidate ISRC code for exact-match short-circuit.
+        candidate_duration_ms (int | None): Candidate duration in milliseconds, used for duration agreement and mismatch penalties.
 
     Returns:
         int: Numeric match score. `100` indicates exact ISRC match; `0` indicates no title match; otherwise a positive score (at least `1`) representing match strength.
@@ -976,6 +991,31 @@ def explain_candidate_score(
     candidate_duration_ms: int | None = None,
     policy: MatchPolicy | None = None,
 ) -> CandidateExplanation:
+    """Return a detailed scoring explanation for a search-result candidate.
+
+    Delegates to :func:`_score_candidate_internal` with ``allow_guarded_fuzzy=True``,
+    exposing the full :class:`CandidateExplanation` shape rather than just the
+    integer score.
+
+    Parameters:
+        row (ExportifyCsvRow): CSV row to match against.
+        candidate_title (str): Candidate track title.
+        candidate_artist (str): Candidate artist string.
+        candidate_album (str): Candidate album string.
+        candidate_date (str): Candidate release date string.
+        candidate_isrc (str): Candidate ISRC code.
+        candidate_duration_ms (int | None): Candidate duration in milliseconds (optional).
+        policy (MatchPolicy | None): Matching policy; defaults to ``MatchPolicy()`` when ``None``.
+
+    Returns:
+        CandidateExplanation: Named tuple with:
+          - ``score``: integer match score (0 = rejected, 100 = exact ISRC match).
+          - ``reason_codes``: tuple of strings explaining the outcome (e.g.
+            ``"accepted_isrc_match"``, ``"reject_bad_context"``,
+            ``"accepted_guarded_fuzzy"``).
+          - ``signals``: read-only mapping of intermediate scoring signals
+            (e.g. ``"title_exact"``, ``"artist_coverage"``, ``"duration_delta_ms"``).
+    """
     return _score_candidate_internal(
         row,
         candidate_title,
@@ -993,6 +1033,29 @@ def is_usable_exportify_row(row: ExportifyCsvRow) -> bool:
     """Whether a CSV row has enough base identity fields to be resolved."""
     return bool(row.track_name.strip()) and bool(
         row.artists_raw.strip() or row.artists_list
+    )
+
+
+def _warn_incomplete_override(
+    source_row_index: int,
+    track_name_hint: str,
+    kind: str,
+    src: str,
+    cand_id: str,
+) -> None:
+    """Log a warning when only one half of a primary or fallback override pair is set."""
+    logger.warning(
+        "Row %d (%r): incomplete %s override "
+        "(override_%s_source=%r, override_%s_candidate_id=%r); "
+        "ignoring override and keeping original %s fields",
+        source_row_index,
+        track_name_hint,
+        kind,
+        kind,
+        src,
+        kind,
+        cand_id,
+        kind,
     )
 
 
@@ -1045,36 +1108,29 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
             override_fallback_id = (
                 row.get("override_fallback_candidate_id") or ""
             ).strip()
-            _track_name_hint = (row.get("track_name") or "").strip()
-
-            def _warn_incomplete_override(kind: str, src: str, cand_id: str) -> None:
-                logger.warning(
-                    "Row %d (%r): incomplete %s override "
-                    "(override_%s_source=%r, override_%s_candidate_id=%r); "
-                    "ignoring override and keeping original %s fields",
-                    source_row_index,
-                    _track_name_hint,
-                    kind,
-                    kind,
-                    src,
-                    kind,
-                    cand_id,
-                    kind,
-                )
+            track_name_hint = (row.get("track_name") or "").strip()
 
             if override_primary_source and override_primary_id:
                 primary_source = override_primary_source
                 primary_candidate_id = override_primary_id
             elif override_primary_source or override_primary_id:
                 _warn_incomplete_override(
-                    "primary", override_primary_source, override_primary_id
+                    source_row_index,
+                    track_name_hint,
+                    "primary",
+                    override_primary_source,
+                    override_primary_id,
                 )
             if override_fallback_source and override_fallback_id:
                 fallback_source = override_fallback_source
                 fallback_candidate_id = override_fallback_id
             elif override_fallback_source or override_fallback_id:
                 _warn_incomplete_override(
-                    "fallback", override_fallback_source, override_fallback_id
+                    source_row_index,
+                    track_name_hint,
+                    "fallback",
+                    override_fallback_source,
+                    override_fallback_id,
                 )
             if primary_source and primary_candidate_id:
                 repair_candidate_ids = {primary_source: primary_candidate_id}
