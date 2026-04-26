@@ -292,6 +292,15 @@ class DownloadsConfig:
     # Verify SSL certificates for API connections
     # Set to false if you encounter SSL certificate verification errors (not recommended)
     verify_ssl: bool
+    # Socket connect timeout (seconds) for provider HTTP requests.
+    api_connect_timeout_seconds: float
+    # Per-read inactivity timeout (seconds) for provider HTTP requests.
+    # This is not a total request timeout.
+    api_read_timeout_seconds: float
+    # Retry attempts for transient provider HTTP request failures.
+    api_request_retries: int
+    # Initial delay (seconds) between provider HTTP retries.
+    api_retry_delay_seconds: float
 
 
 @dataclass(slots=True)

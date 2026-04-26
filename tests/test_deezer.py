@@ -231,6 +231,11 @@ async def test_deezer_downloadable_encrypted_stream_does_not_buffer_whole_file(
 
     assert output_path.read_bytes() == b"".join(chunks)
     assert sum(callback_calls) == len(b"".join(chunks))
+    # At least 2 callback invocations confirm chunked streaming rather than
+    # full-file buffering (a regression that buffers the whole stream would
+    # still satisfy the sum check but would only call back once).
+    assert len(callback_calls) >= 2
+    # 4 chunks produce 4 full 6144-byte encrypt groups → 4 decrypt calls.
     assert decrypt.call_count == 4
 
 

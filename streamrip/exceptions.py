@@ -76,3 +76,7 @@ class DownloadError(Exception):
     This is the canonical signal that ``Track.download()`` has given up so
     that ``Track.rip()`` can skip post-processing and success bookkeeping.
     """
+
+
+class SslHelpPromptError(Exception):
+    """Raised when CLI should present SSL troubleshooting guidance."""
