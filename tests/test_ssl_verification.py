@@ -334,9 +334,8 @@ def test_cli_option_registered():
 
 def test_error_handling_with_ssl_errors():
     """Test the error handling output with SSL errors."""
-    with patch("sys.stdout"), patch("sys.exit") as mock_exit:
-        # Call the function
-        print_ssl_error_help()
+    from streamrip.exceptions import SslHelpPromptError
 
-        # Check exit code
-        mock_exit.assert_called_once_with(1)
+    with pytest.raises(SslHelpPromptError) as exc_info:
+        print_ssl_error_help()
+    assert "Cannot verify SSL certificate" in str(exc_info.value)

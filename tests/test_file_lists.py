@@ -855,6 +855,16 @@ def test_bad_context_fields_env_override_respected(monkeypatch):
     assert policy.bad_context_fields == ("title", "album")
 
 
+def test_bad_context_fields_env_override_warns_for_unknown_fields(monkeypatch, caplog):
+    monkeypatch.setenv("STREAMRIP_BAD_CONTEXT_FIELDS", "album,unknown,artist,unknown")
+    with caplog.at_level("WARNING"):
+        policy = MatchPolicy.from_config(
+            type("Cfg", (), {"bad_context_fields": ["title"]})()
+        )
+    assert policy.bad_context_fields == ("album", "artist")
+    assert "Ignoring unknown bad-context field 'unknown'" in caplog.text
+
+
 def test_guarded_fuzzy_normal_mode_accepts_high_similarity_with_strong_context():
     row = _make_row(
         title="Dancing In The Moonlight",

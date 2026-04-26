@@ -6,6 +6,7 @@ import re
 
 from ..config import Config
 from ..exceptions import NonStreamableError
+from ..utils.network import aiohttp_call_with_retry
 from .client import Client
 from .downloadable import SoundcloudDownloadable
 
@@ -36,8 +37,11 @@ class SoundcloudClient(Client):
         )
 
     async def login(self):
+        downloads_cfg = self.global_config.session.downloads
         self.session = await self.get_session(
-            verify_ssl=self.global_config.session.downloads.verify_ssl
+            verify_ssl=downloads_cfg.verify_ssl,
+            connect_timeout=downloads_cfg.api_connect_timeout_seconds,
+            read_timeout=downloads_cfg.api_read_timeout_seconds,
         )
         client_id, app_version = self.config.client_id, self.config.app_version
         if not client_id or not app_version or not (await self._announce_success()):
@@ -239,8 +243,23 @@ class SoundcloudClient(Client):
             _params.update(params)
 
         logger.debug(f"Requesting {url} with {_params=}, {headers=}")
-        async with self.session.get(url, params=_params, headers=headers) as resp:
-            return await resp.json(), resp.status
+        policy = self.network_retry_policy(self.global_config.session.downloads)
+
+        async def _call() -> tuple[dict, int]:
+            async with self.session.get(url, params=_params, headers=headers) as resp:
+                return await resp.json(), resp.status
+
+        return await aiohttp_call_with_retry(
+            _call,
+            operation="soundcloud_request_json",
+            attempts=policy.attempts,
+            delay_seconds=policy.delay_seconds,
+            backoff=policy.backoff,
+            should_retry_result=lambda response: (
+                response[1] in {408, 429, 500, 502, 503, 504},
+                f"http_{response[1]}",
+            ),
+        )
 
     async def _request_body(self, url, params=None, headers=None):
         c = self.config
@@ -252,8 +271,23 @@ class SoundcloudClient(Client):
         if params is not None:
             _params.update(params)
 
-        async with self.session.get(url, params=_params, headers=headers) as resp:
-            return await resp.content.read(), resp.status
+        policy = self.network_retry_policy(self.global_config.session.downloads)
+
+        async def _call() -> tuple[bytes, int]:
+            async with self.session.get(url, params=_params, headers=headers) as resp:
+                return await resp.content.read(), resp.status
+
+        return await aiohttp_call_with_retry(
+            _call,
+            operation="soundcloud_request_body",
+            attempts=policy.attempts,
+            delay_seconds=policy.delay_seconds,
+            backoff=policy.backoff,
+            should_retry_result=lambda response: (
+                response[1] in {408, 429, 500, 502, 503, 504},
+                f"http_{response[1]}",
+            ),
+        )
 
     async def _announce_success(self):
         url = f"{BASE}/announcements"

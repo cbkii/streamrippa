@@ -172,25 +172,34 @@ class DeezerDownloadable(Downloadable):
                     "Deezer file id=%s is encrypted. Decrypting stream chunks.",
                     self.id,
                 )
-
-                buf = bytearray()
-                async for data, _ in resp.content.iter_chunks():
-                    buf += data
-                    callback(len(data))
-
                 encrypt_chunk_size = 3 * 2048
+                carry = bytearray()
                 async with aiofiles.open(path, "wb") as audio:
-                    buflen = len(buf)
-                    for i in range(0, buflen, encrypt_chunk_size):
-                        data = buf[i : min(i + encrypt_chunk_size, buflen)]
-                        if len(data) >= 2048:
-                            decrypted_chunk = (
-                                self._decrypt_chunk(blowfish_key, data[:2048])
-                                + data[2048:]
+                    async for data, _ in resp.content.iter_chunks():
+                        if not data:
+                            continue
+                        carry.extend(data)
+                        callback(len(data))
+                        # Only the first 2048 bytes of every 6144-byte group
+                        # are Blowfish-encrypted; the trailing 4096 bytes pass
+                        # through unmodified.  Tails shorter than 2048 are
+                        # also written raw (Blowfish requires block alignment).
+                        while len(carry) >= encrypt_chunk_size:
+                            block = bytes(carry[:encrypt_chunk_size])
+                            del carry[:encrypt_chunk_size]
+                            await audio.write(
+                                self._decrypt_chunk(blowfish_key, block[:2048])
+                                + block[2048:]
+                            )
+                    if carry:
+                        tail = bytes(carry)
+                        if len(tail) >= 2048:
+                            await audio.write(
+                                self._decrypt_chunk(blowfish_key, tail[:2048])
+                                + tail[2048:]
                             )
                         else:
-                            decrypted_chunk = data
-                        await audio.write(decrypted_chunk)
+                            await audio.write(tail)
 
     @staticmethod
     def _decrypt_chunk(key, data):

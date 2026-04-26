@@ -531,6 +531,14 @@ def _provider_threshold(csv_cfg, source: str, *, repair_mode: bool) -> int:
     raw_map = getattr(csv_cfg, "acceptance_threshold_by_source", {}) if csv_cfg else {}
     if isinstance(raw_map, dict):
         raw = raw_map.get(source, default_threshold)
+        if isinstance(raw, bool):
+            logger.warning(
+                "Invalid csv_resolver.acceptance_threshold_by_source value for '%s': %r; using default=%d",
+                source,
+                raw,
+                default_threshold,
+            )
+            return default_threshold
         try:
             threshold = int(raw)
         except (TypeError, ValueError):
@@ -574,6 +582,36 @@ def _serialize_rejected_candidate(candidate: TrackCandidate) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def _candidate_payload(c: TrackCandidate | None) -> dict | None:
+    if c is None:
+        return None
+    return {
+        "source": c.source,
+        "id": c.id,
+        "title": c.title,
+        "artist": c.artist,
+        "album": c.album,
+        "date": c.release_date,
+        "isrc": c.isrc,
+        "score": c.score,
+        "confidence": c.confidence,
+        "margin_to_second": c.margin_to_second,
+        "reason_codes": list(c.reason_codes),
+        "signals": c.signals or {},
+    }
+
+
+def _rejected_candidate_payloads(
+    candidates: list[TrackCandidate] | None,
+) -> list[dict]:
+    serialized: list[dict] = []
+    for candidate in candidates or []:
+        payload = _candidate_payload(candidate)
+        if payload is not None:
+            serialized.append(payload)
+    return serialized
 
 
 def _margin_to_second_best(score: int, population_scores: list[int]) -> int:
@@ -1293,6 +1331,7 @@ class PendingCsvPlaylist(Pending):
     negative_candidate_cache: dict[tuple[str, str], str] | None = None
     local_file_index: dict[str, list[Path]] | None = None
     local_duration_cache: dict[str, float | None] | None = None
+    telemetry_log: CsvResolverTelemetryLog | None = None
     local_skipped_count: int = 0
     low_score_accepted_count: int = 0
     unresolved_count: int = 0
@@ -1328,6 +1367,17 @@ class PendingCsvPlaylist(Pending):
 
     def _csv_cfg(self):
         return getattr(self.config.session, "csv_resolver", None)
+
+    def _telemetry(self) -> CsvResolverTelemetryLog:
+        if self.telemetry_log is None:
+            csv_cfg = self._csv_cfg()
+            path = (
+                str(getattr(csv_cfg, "telemetry_jsonl_path", "") or "")
+                if csv_cfg is not None
+                else ""
+            )
+            self.telemetry_log = CsvResolverTelemetryLog(path)
+        return self.telemetry_log
 
     def _get_duration_tolerance(self) -> tuple[float, float]:
         csv_cfg = self._csv_cfg()
@@ -1714,9 +1764,7 @@ class PendingCsvPlaylist(Pending):
 
         primary_outcome = ResolverOutcome(None, "no results", "", "")
         fallback_outcome = ResolverOutcome(None, "no results", "", "")
-        telemetry = CsvResolverTelemetryLog(
-            str(getattr(csv_cfg, "telemetry_jsonl_path", "") or "")
-        )
+        telemetry = self._telemetry()
 
         if not is_usable_exportify_row(row):
             reason = "invalid row: missing track name or artist"
@@ -2075,24 +2123,6 @@ class PendingCsvPlaylist(Pending):
             else None
         )
 
-        def _candidate_payload(c: TrackCandidate | None) -> dict | None:
-            if c is None:
-                return None
-            return {
-                "source": c.source,
-                "id": c.id,
-                "title": c.title,
-                "artist": c.artist,
-                "album": c.album,
-                "date": c.release_date,
-                "isrc": c.isrc,
-                "score": c.score,
-                "confidence": c.confidence,
-                "margin_to_second": c.margin_to_second,
-                "reason_codes": list(c.reason_codes),
-                "signals": c.signals or {},
-            }
-
         async def _guarded_low_score_candidate(
             outcome: ResolverOutcome | None,
         ) -> TrackCandidate | None:
@@ -2215,11 +2245,9 @@ class PendingCsvPlaylist(Pending):
                         "threshold": primary_min_score,
                         "reason": primary_outcome.reason,
                         "candidate": _candidate_payload(primary_outcome.candidate),
-                        "rejected": [
-                            _candidate_payload(c)
-                            for c in (primary_outcome.rejected or [])
-                            if _candidate_payload(c) is not None
-                        ],
+                        "rejected": _rejected_candidate_payloads(
+                            primary_outcome.rejected
+                        ),
                     },
                     "fallback": {
                         "source": (
@@ -2228,11 +2256,9 @@ class PendingCsvPlaylist(Pending):
                         "threshold": fallback_min_score,
                         "reason": fallback_outcome.reason,
                         "candidate": _candidate_payload(fallback_outcome.candidate),
-                        "rejected": [
-                            _candidate_payload(c)
-                            for c in (fallback_outcome.rejected or [])
-                            if _candidate_payload(c) is not None
-                        ],
+                        "rejected": _rejected_candidate_payloads(
+                            fallback_outcome.rejected
+                        ),
                     },
                 },
                 "selected": _candidate_payload(selected),
