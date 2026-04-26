@@ -45,6 +45,15 @@ def test_album_metadata_qobuz():
     assert m.tracktotal == 11
 
 
+def test_album_metadata_qobuz_falls_back_to_single_genre_name():
+    resp = dict(qobuz_album_resp)
+    resp.pop("genres_list", None)
+
+    m = AlbumMetadata.from_qobuz(resp)
+
+    assert m.genre == ["Rock"]
+
+
 def test_track_metadata_qobuz():
     a = AlbumMetadata.from_qobuz(qobuz_track_resp["album"])
     t = TrackMetadata.from_qobuz(a, qobuz_track_resp)

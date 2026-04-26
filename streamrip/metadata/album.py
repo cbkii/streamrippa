@@ -84,7 +84,11 @@ class AlbumMetadata:
     def from_qobuz(cls, resp: dict) -> AlbumMetadata:
         album = resp.get("title", "Unknown Album")
         tracktotal = resp.get("tracks_count", 1)
-        genre = [safe_get(resp, "genre", "name")] or resp.get("genre") or []
+        genre = safe_get(resp, "genres_list") or resp.get("genres_list") or []
+        if not genre:
+            genre_name = safe_get(resp, "genre", "name")
+            genre = [genre_name] if isinstance(genre_name, str) and genre_name else []
+        genre = [name for name in genre if isinstance(name, str) and name]
         genres = list(set(genre_clean.findall("/".join(genre))))
         date = resp.get("release_date_original") or resp.get("release_date")
         year = date[:4] if date is not None else "Unknown"

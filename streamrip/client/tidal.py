@@ -128,7 +128,12 @@ class TidalClient(Client):
                     item["lyrics"] = resp.get("lyrics") or ""
                 else:
                     item["lyrics"] = resp.get("subtitles") or resp.get("lyrics") or ""
-            except TypeError as e:
+            except (
+                TypeError,
+                NonStreamableError,
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+            ) as e:
                 logger.warning(f"Failed to get lyrics for {item_id}: {e}")
 
         logger.debug(item)
