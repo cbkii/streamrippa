@@ -731,6 +731,7 @@ def _score_candidate_internal(
                 row.album
                 and candidate_album
                 and row_album_norm
+                and cand_album_norm
                 and (
                     row_album_norm in cand_album_norm
                     or cand_album_norm in row_album_norm

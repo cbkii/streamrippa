@@ -597,6 +597,10 @@ class QobuzClient(Client):
         async def _call() -> tuple[int, dict]:
             async with self.rate_limiter:
                 async with self.session.get(url, params=params) as response:
+                    if response.status in {408, 429, 500, 502, 503, 504}:
+                        # Avoid raising on non-JSON transient bodies so the
+                        # status-based retry predicate can fire.
+                        return response.status, {}
                     return response.status, await response.json()
 
         return await aiohttp_call_with_retry(

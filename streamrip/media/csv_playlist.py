@@ -584,6 +584,36 @@ def _serialize_rejected_candidate(candidate: TrackCandidate) -> str:
     )
 
 
+def _candidate_payload(c: TrackCandidate | None) -> dict | None:
+    if c is None:
+        return None
+    return {
+        "source": c.source,
+        "id": c.id,
+        "title": c.title,
+        "artist": c.artist,
+        "album": c.album,
+        "date": c.release_date,
+        "isrc": c.isrc,
+        "score": c.score,
+        "confidence": c.confidence,
+        "margin_to_second": c.margin_to_second,
+        "reason_codes": list(c.reason_codes),
+        "signals": c.signals or {},
+    }
+
+
+def _rejected_candidate_payloads(
+    candidates: list[TrackCandidate] | None,
+) -> list[dict]:
+    serialized: list[dict] = []
+    for candidate in candidates or []:
+        payload = _candidate_payload(candidate)
+        if payload is not None:
+            serialized.append(payload)
+    return serialized
+
+
 def _margin_to_second_best(score: int, population_scores: list[int]) -> int:
     if not population_scores:
         return 0
@@ -1341,9 +1371,12 @@ class PendingCsvPlaylist(Pending):
     def _telemetry(self) -> CsvResolverTelemetryLog:
         if self.telemetry_log is None:
             csv_cfg = self._csv_cfg()
-            self.telemetry_log = CsvResolverTelemetryLog(
+            path = (
                 str(getattr(csv_cfg, "telemetry_jsonl_path", "") or "")
+                if csv_cfg is not None
+                else ""
             )
+            self.telemetry_log = CsvResolverTelemetryLog(path)
         return self.telemetry_log
 
     def _get_duration_tolerance(self) -> tuple[float, float]:
@@ -2090,34 +2123,6 @@ class PendingCsvPlaylist(Pending):
             else None
         )
 
-        def _candidate_payload(c: TrackCandidate | None) -> dict | None:
-            if c is None:
-                return None
-            return {
-                "source": c.source,
-                "id": c.id,
-                "title": c.title,
-                "artist": c.artist,
-                "album": c.album,
-                "date": c.release_date,
-                "isrc": c.isrc,
-                "score": c.score,
-                "confidence": c.confidence,
-                "margin_to_second": c.margin_to_second,
-                "reason_codes": list(c.reason_codes),
-                "signals": c.signals or {},
-            }
-
-        def _serialized_rejected_candidates(
-            candidates: list[TrackCandidate] | None,
-        ) -> list[dict]:
-            serialized: list[dict] = []
-            for candidate in candidates or []:
-                payload = _candidate_payload(candidate)
-                if payload is not None:
-                    serialized.append(payload)
-            return serialized
-
         async def _guarded_low_score_candidate(
             outcome: ResolverOutcome | None,
         ) -> TrackCandidate | None:
@@ -2240,7 +2245,7 @@ class PendingCsvPlaylist(Pending):
                         "threshold": primary_min_score,
                         "reason": primary_outcome.reason,
                         "candidate": _candidate_payload(primary_outcome.candidate),
-                        "rejected": _serialized_rejected_candidates(
+                        "rejected": _rejected_candidate_payloads(
                             primary_outcome.rejected
                         ),
                     },
@@ -2251,7 +2256,7 @@ class PendingCsvPlaylist(Pending):
                         "threshold": fallback_min_score,
                         "reason": fallback_outcome.reason,
                         "candidate": _candidate_payload(fallback_outcome.candidate),
-                        "rejected": _serialized_rejected_candidates(
+                        "rejected": _rejected_candidate_payloads(
                             fallback_outcome.rejected
                         ),
                     },

@@ -338,18 +338,25 @@ class TidalClient(Client):
         """
         policy = self.network_retry_policy(self.global_config.session.downloads)
 
-        async def _call() -> dict:
+        async def _call() -> tuple[int, dict]:
             async with self.rate_limiter:
                 async with self.session.post(url, data=data, auth=auth) as resp:
-                    return await resp.json()
+                    if resp.status in {408, 429, 500, 502, 503, 504}:
+                        return resp.status, {}
+                    return resp.status, await resp.json()
 
-        return await aiohttp_call_with_retry(
+        _status, body = await aiohttp_call_with_retry(
             _call,
             operation="tidal_api_post",
             attempts=policy.attempts,
             delay_seconds=policy.delay_seconds,
             backoff=policy.backoff,
+            should_retry_result=lambda response: (
+                response[0] in {408, 429, 500, 502, 503, 504},
+                f"http_{response[0]}",
+            ),
         )
+        return body
 
     async def _api_request(self, path: str, params=None, base: str = BASE) -> dict:
         """Handle Tidal API requests.
@@ -371,7 +378,7 @@ class TidalClient(Client):
             async with self.rate_limiter:
                 async with self.session.get(f"{base}/{path}", params=params) as resp:
                     if resp.status == 404:
-                        logger.warning("TIDAL: track not found", resp)
+                        logger.warning("TIDAL: track not found: %s", resp)
                         raise NonStreamableError("TIDAL: Track not found")
                     resp.raise_for_status()
                     return await resp.json()
