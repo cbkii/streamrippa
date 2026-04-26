@@ -1176,6 +1176,26 @@ async def test_telemetry_jsonl_written(tmp_path):
     assert set(payload["provider_outcomes"].keys()) == {"primary", "fallback"}
 
 
+@pytest.mark.asyncio
+async def test_telemetry_jsonl_disabled_does_not_write(tmp_path):
+    db = _make_db()
+    cfg = _make_config()
+    telemetry_path = tmp_path / "resolver.jsonl"
+    cfg.session.csv_resolver.telemetry_jsonl_path = ""
+    primary_client = _make_client("qobuz")
+    primary_client.search = AsyncMock(return_value=[])
+    pending = PendingCsvPlaylist(
+        playlist_name="Test",
+        rows=[_make_row(title="Missing", artists=["Artist"])],
+        primary_client=primary_client,
+        fallback_client=None,
+        config=cfg,
+        db=db,
+    )
+    await pending.resolve()
+    assert not telemetry_path.exists()
+
+
 def test_provider_threshold_invalid_value_logs_warning(caplog):
     cfg = _make_config()
     cfg.session.csv_resolver.acceptance_threshold_by_source = {"qobuz": "bad"}
@@ -1187,6 +1207,26 @@ def test_provider_threshold_invalid_value_logs_warning(caplog):
         )
     assert result == 50
     assert "Invalid csv_resolver.acceptance_threshold_by_source value" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("configured_value", "expected"),
+    [("42", 42), (42, 42), (True, 50), ("", 50), (-5, 50), (150, 50)],
+)
+def test_provider_threshold_coercion_edges(configured_value, expected, caplog):
+    cfg = _make_config()
+    cfg.session.csv_resolver.acceptance_threshold_by_source = {
+        "qobuz": configured_value
+    }
+    from streamrip.media.csv_playlist import _provider_threshold
+
+    with caplog.at_level("WARNING"):
+        result = _provider_threshold(
+            cfg.session.csv_resolver, "qobuz", repair_mode=False
+        )
+    assert result == expected
+    if expected == 50:
+        assert "csv_resolver.acceptance_threshold_by_source" in caplog.text
 
 
 @pytest.mark.asyncio

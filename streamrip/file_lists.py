@@ -356,6 +356,13 @@ _VARIANT_ALIASES: dict[str, tuple[str, ...]] = {
     "tribute": ("tribute", "made famous by"),
     "slowed_sped": ("slowed", "sped up", "reverb"),
 }
+_VARIANT_ALIAS_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    canonical: tuple(
+        re.compile(rf"\b{re.escape(alias)}\b")
+        for alias in sorted(aliases, key=len, reverse=True)
+    )
+    for canonical, aliases in _VARIANT_ALIASES.items()
+}
 _BAD_CONTEXT_MARKERS: tuple[str, ...] = (
     "karaoke",
     "tribute",
@@ -433,6 +440,17 @@ _CORE_STRIP_MARKERS: frozenset[str] = frozenset(
         "ft",
     }
 )
+_CORE_STRIP_MARKER_PATTERN: re.Pattern[str] = re.compile(
+    r"\b(?:"
+    + "|".join(
+        sorted(
+            (re.escape(marker) for marker in _CORE_STRIP_MARKERS),
+            key=len,
+            reverse=True,
+        )
+    )
+    + r")\b"
+)
 
 
 def _normalise_variant_text(s: str) -> str:
@@ -440,12 +458,7 @@ def _normalise_variant_text(s: str) -> str:
     norm = _normalise(strip_title_decorators(s))
     if not norm:
         return ""
-    marker_pattern = "|".join(
-        sorted(
-            (re.escape(marker) for marker in _CORE_STRIP_MARKERS), key=len, reverse=True
-        )
-    )
-    norm = re.sub(rf"\b(?:{marker_pattern})\b", "", norm)
+    norm = _CORE_STRIP_MARKER_PATTERN.sub("", norm)
     norm = re.sub(r"\b(?:19|20)\d{2}\b", "", norm)
     norm = re.sub(r"\s+", " ", norm).strip()
     return norm
@@ -495,8 +508,8 @@ def _extract_variant_markers(text: str) -> frozenset[str]:
     if not norm:
         return frozenset()
     markers: list[str] = []
-    for canonical, aliases in _VARIANT_ALIASES.items():
-        if any(re.search(rf"\b{re.escape(alias)}\b", norm) for alias in aliases):
+    for canonical, patterns in _VARIANT_ALIAS_PATTERNS.items():
+        if any(pattern.search(norm) for pattern in patterns):
             markers.append(canonical)
     return frozenset(sorted(markers))
 
@@ -712,15 +725,15 @@ def _score_candidate_internal(
             ).ratio()
             signals["title_similarity"] = round(fuzzy_ratio, 4)
             artist_ok = _artist_overlap(row.artists_list, candidate_artist)
+            row_album_norm = _normalise_variant_text(row.album)
+            cand_album_norm = _normalise_variant_text(candidate_album)
             album_ok = bool(
                 row.album
                 and candidate_album
-                and _normalise_variant_text(row.album)
+                and row_album_norm
                 and (
-                    _normalise_variant_text(row.album)
-                    in _normalise_variant_text(candidate_album)
-                    or _normalise_variant_text(candidate_album)
-                    in _normalise_variant_text(row.album)
+                    row_album_norm in cand_album_norm
+                    or cand_album_norm in row_album_norm
                 )
             )
             duration_ok = bool(
