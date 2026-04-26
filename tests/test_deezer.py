@@ -1,10 +1,12 @@
 import os
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 from util import arun
 
 from streamrip.client.deezer import DeezerClient
+from streamrip.client.downloadable import DeezerDownloadable
 from streamrip.config import Config
 from streamrip.exceptions import NonStreamableError
 
@@ -168,6 +170,68 @@ def test_deezer_falls_back_to_encrypted_url_when_media_api_returns_none(
 
     encrypted_url.assert_called_once()
     assert downloadable.url.startswith("https://e-cdns-proxy")
+
+
+@pytest.mark.asyncio
+async def test_deezer_downloadable_encrypted_stream_does_not_buffer_whole_file(
+    tmp_path: Path,
+):
+    class _FakeContent:
+        def __init__(self, chunks):
+            self._chunks = chunks
+
+        async def iter_chunks(self):
+            for chunk in self._chunks:
+                yield chunk, True
+
+    class _FakeResponse:
+        def __init__(self, chunks):
+            self.headers = {"Content-Length": str(sum(len(c) for c in chunks))}
+            self.content = _FakeContent(chunks)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+    class _FakeSession:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self.headers = {}
+
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse(self._chunks)
+
+    chunks = [
+        b"A" * 2048,
+        b"B" * 2048,
+        b"C" * 2048,
+        b"D" * 16000,
+    ]
+    info = {
+        "url": "https://e-cdns-proxy-a.dzcdn.net/mobile/1/abc",
+        "id": 123,
+        "quality": 2,
+        "quality_to_size": [0, 0, 22144],
+    }
+    downloadable = DeezerDownloadable(_FakeSession(chunks), info)
+    callback_calls: list[int] = []
+    output_path = tmp_path / "out.bin"
+
+    with patch.object(
+        DeezerDownloadable,
+        "_decrypt_chunk",
+        side_effect=lambda _key, data: data,
+    ) as decrypt:
+        await downloadable._download(str(output_path), callback_calls.append)
+
+    assert output_path.read_bytes() == b"".join(chunks)
+    assert sum(callback_calls) == len(b"".join(chunks))
+    assert decrypt.call_count == 4
 
 
 # ===== INTEGRATION TEST =====

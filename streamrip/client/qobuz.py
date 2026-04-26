@@ -20,6 +20,7 @@ from ..exceptions import (
     MissingCredentialsError,
     NonStreamableError,
 )
+from ..utils.network import aiohttp_call_with_retry
 from .client import Client
 from .downloadable import BasicDownloadable, Downloadable
 
@@ -227,11 +228,14 @@ class QobuzClient(Client):
             raise AuthenticationError("Already logged in to Qobuz in this session")
 
         c = self.config.session.qobuz
+        downloads_cfg = self.config.session.downloads
         if not c.email_or_userid or not c.password_or_token:
             raise MissingCredentialsError
 
         self.session = await self.get_session(
-            verify_ssl=self.config.session.downloads.verify_ssl
+            verify_ssl=downloads_cfg.verify_ssl,
+            connect_timeout=downloads_cfg.api_connect_timeout_seconds,
+            read_timeout=downloads_cfg.api_read_timeout_seconds,
         )
 
         if not c.app_id or not c.secrets:
@@ -588,9 +592,24 @@ class QobuzClient(Client):
             epoint,
             self._redact_sensitive_mapping(params),
         )
-        async with self.rate_limiter:
-            async with self.session.get(url, params=params) as response:
-                return response.status, await response.json()
+        policy = self.network_retry_policy(self.config.session.downloads)
+
+        async def _call() -> tuple[int, dict]:
+            async with self.rate_limiter:
+                async with self.session.get(url, params=params) as response:
+                    return response.status, await response.json()
+
+        return await aiohttp_call_with_retry(
+            _call,
+            operation=f"qobuz_api:{epoint}",
+            attempts=policy.attempts,
+            delay_seconds=policy.delay_seconds,
+            backoff=policy.backoff,
+            should_retry_result=lambda response: (
+                response[0] in {408, 429, 500, 502, 503, 504},
+                f"http_{response[0]}",
+            ),
+        )
 
     @staticmethod
     def _redact_sensitive_mapping(payload: dict) -> dict:

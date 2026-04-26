@@ -10,6 +10,7 @@ import aiohttp
 
 from ..config import Config
 from ..exceptions import NonStreamableError
+from ..utils.network import aiohttp_call_with_retry
 from .client import Client
 from .downloadable import TidalDownloadable
 
@@ -50,8 +51,11 @@ class TidalClient(Client):
         )
 
     async def login(self):
+        downloads_cfg = self.global_config.session.downloads
         self.session = await self.get_session(
-            verify_ssl=self.global_config.session.downloads.verify_ssl
+            verify_ssl=downloads_cfg.verify_ssl,
+            connect_timeout=downloads_cfg.api_connect_timeout_seconds,
+            read_timeout=downloads_cfg.api_read_timeout_seconds,
         )
         c = self.config
         if not c.access_token:
@@ -332,9 +336,20 @@ class TidalClient(Client):
         :param data:
         :param auth:
         """
-        async with self.rate_limiter:
-            async with self.session.post(url, data=data, auth=auth) as resp:
-                return await resp.json()
+        policy = self.network_retry_policy(self.global_config.session.downloads)
+
+        async def _call() -> dict:
+            async with self.rate_limiter:
+                async with self.session.post(url, data=data, auth=auth) as resp:
+                    return await resp.json()
+
+        return await aiohttp_call_with_retry(
+            _call,
+            operation="tidal_api_post",
+            attempts=policy.attempts,
+            delay_seconds=policy.delay_seconds,
+            backoff=policy.backoff,
+        )
 
     async def _api_request(self, path: str, params=None, base: str = BASE) -> dict:
         """Handle Tidal API requests.
@@ -350,10 +365,21 @@ class TidalClient(Client):
         params["countryCode"] = self.config.country_code
         params["limit"] = 100
 
-        async with self.rate_limiter:
-            async with self.session.get(f"{base}/{path}", params=params) as resp:
-                if resp.status == 404:
-                    logger.warning("TIDAL: track not found", resp)
-                    raise NonStreamableError("TIDAL: Track not found")
-                resp.raise_for_status()
-                return await resp.json()
+        policy = self.network_retry_policy(self.global_config.session.downloads)
+
+        async def _call() -> dict:
+            async with self.rate_limiter:
+                async with self.session.get(f"{base}/{path}", params=params) as resp:
+                    if resp.status == 404:
+                        logger.warning("TIDAL: track not found", resp)
+                        raise NonStreamableError("TIDAL: Track not found")
+                    resp.raise_for_status()
+                    return await resp.json()
+
+        return await aiohttp_call_with_retry(
+            _call,
+            operation=f"tidal_api_get:{path}",
+            attempts=policy.attempts,
+            delay_seconds=policy.delay_seconds,
+            backoff=policy.backoff,
+        )

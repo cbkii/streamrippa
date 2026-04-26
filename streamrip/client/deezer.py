@@ -42,8 +42,11 @@ class DeezerClient(Client):
 
     async def login(self):
         # Used for track downloads
+        downloads_cfg = self.global_config.session.downloads
         self.session = await self.get_session(
-            verify_ssl=self.global_config.session.downloads.verify_ssl
+            verify_ssl=downloads_cfg.verify_ssl,
+            connect_timeout=downloads_cfg.api_connect_timeout_seconds,
+            read_timeout=downloads_cfg.api_read_timeout_seconds,
         )
         arl = self.config.arl
         if not arl:

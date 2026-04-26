@@ -3,6 +3,7 @@
 import contextlib
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import aiohttp
 import aiolimiter
@@ -15,6 +16,13 @@ logger = logging.getLogger("streamrip")
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"
 )
+
+
+@dataclass(slots=True, frozen=True)
+class NetworkRetryPolicy:
+    attempts: int
+    delay_seconds: float
+    backoff: float = 2.0
 
 
 class Client(ABC):
@@ -51,7 +59,10 @@ class Client(ABC):
 
     @staticmethod
     async def get_session(
-        headers: dict | None = None, verify_ssl: bool = True
+        headers: dict | None = None,
+        verify_ssl: bool = True,
+        connect_timeout: float = 15.0,
+        read_timeout: float = 120.0,
     ) -> aiohttp.ClientSession:
         if headers is None:
             headers = {}
@@ -59,8 +70,23 @@ class Client(ABC):
         # Get connector kwargs based on SSL verification setting
         connector_kwargs = get_aiohttp_connector_kwargs(verify_ssl=verify_ssl)
         connector = aiohttp.TCPConnector(**connector_kwargs)
+        timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=max(0.1, float(connect_timeout)),
+            sock_read=max(1.0, float(read_timeout)),
+        )
 
         return aiohttp.ClientSession(
             headers={"User-Agent": DEFAULT_USER_AGENT} | headers,
             connector=connector,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def network_retry_policy(downloads_cfg) -> NetworkRetryPolicy:
+        return NetworkRetryPolicy(
+            attempts=max(1, int(getattr(downloads_cfg, "api_request_retries", 2))),
+            delay_seconds=max(
+                0.0, float(getattr(downloads_cfg, "api_retry_delay_seconds", 0.75))
+            ),
         )

@@ -2,7 +2,8 @@
 
 import logging
 import ssl
-import sys
+
+from ..exceptions import SslHelpPromptError
 
 logger = logging.getLogger("streamrip")
 
@@ -60,16 +61,19 @@ def get_aiohttp_connector_kwargs(verify_ssl=True):
 
 def print_ssl_error_help():
     """Print helpful error message when SSL verification fails."""
-    print("\nError: Cannot verify SSL certificate.")
-    print("Options:")
-    print("  1. Run again with the --no-ssl-verify flag (less secure)")
-    print(
-        '     Example: rip --no-ssl-verify url "https://tidal.com/browse/playlist/..."'
+    message = "\n".join(
+        [
+            "",
+            "Error: Cannot verify SSL certificate.",
+            "Options:",
+            "  1. Run again with the --no-ssl-verify flag (less secure)",
+            '     Example: rip --no-ssl-verify url "https://tidal.com/browse/playlist/..."',
+            "",
+            "  2. Install certifi for better certificate handling:",
+            "     pip install certifi",
+            "",
+            "  3. Update your certificates:",
+            "     pip install --upgrade certifi",
+        ]
     )
-    print()
-    print("  2. Install certifi for better certificate handling:")
-    print("     pip install certifi")
-    print()
-    print("  3. Update your certificates:")
-    print("     pip install --upgrade certifi")
-    sys.exit(1)
+    raise SslHelpPromptError(message)

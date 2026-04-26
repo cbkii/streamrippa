@@ -285,10 +285,14 @@ async def url(ctx, urls):
                     console.print(Markdown(notes))
 
     except aiohttp.ClientConnectorCertificateError as e:
+        from ..exceptions import SslHelpPromptError
         from ..utils.ssl_utils import print_ssl_error_help
 
         console.print(f"[red]SSL Certificate verification error: {e}[/red]")
-        print_ssl_error_help()
+        try:
+            print_ssl_error_help()
+        except SslHelpPromptError as help_error:
+            console.print(help_error)
         failures = 1
 
     if failures > 0:
@@ -419,10 +423,14 @@ async def file(ctx, path, list_mode, source, fallback_source):
 
                 failures = await main.rip()
     except aiohttp.ClientConnectorCertificateError as e:
+        from ..exceptions import SslHelpPromptError
         from ..utils.ssl_utils import print_ssl_error_help
 
         console.print(f"[red]SSL Certificate verification error: {e}[/red]")
-        print_ssl_error_help()
+        try:
+            print_ssl_error_help()
+        except SslHelpPromptError as help_error:
+            console.print(help_error)
         failures = 1
 
     if failures > 0:
