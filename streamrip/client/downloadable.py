@@ -180,6 +180,10 @@ class DeezerDownloadable(Downloadable):
                             continue
                         carry.extend(data)
                         callback(len(data))
+                        # Only the first 2048 bytes of every 6144-byte group
+                        # are Blowfish-encrypted; the trailing 4096 bytes pass
+                        # through unmodified.  Tails shorter than 2048 are
+                        # also written raw (Blowfish requires block alignment).
                         while len(carry) >= encrypt_chunk_size:
                             block = bytes(carry[:encrypt_chunk_size])
                             del carry[:encrypt_chunk_size]

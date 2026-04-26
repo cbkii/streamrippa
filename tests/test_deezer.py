@@ -234,6 +234,75 @@ async def test_deezer_downloadable_encrypted_stream_does_not_buffer_whole_file(
     assert decrypt.call_count == 4
 
 
+@pytest.mark.asyncio
+async def test_deezer_downloadable_encrypted_stream_small_tail(
+    tmp_path: Path,
+):
+    """Tail shorter than 2048 bytes must be written raw (no decrypt call)."""
+
+    class _FakeContent:
+        def __init__(self, chunks):
+            self._chunks = chunks
+
+        async def iter_chunks(self):
+            for chunk in self._chunks:
+                yield chunk, True
+
+    class _FakeResponse:
+        def __init__(self, chunks):
+            self.headers = {"Content-Length": str(sum(len(c) for c in chunks))}
+            self.content = _FakeContent(chunks)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+    class _FakeSession:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self.headers = {}
+
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse(self._chunks)
+
+    # 4 full 6144-byte groups plus a 1024-byte tail which is below 2048 and must
+    # be written raw (no decrypt call for the tail).  Total > 20 000 bytes avoids
+    # the small-file JSON-error probe in DeezerDownloadable._download.
+    chunks = [
+        b"A" * 6144,
+        b"B" * 6144,
+        b"C" * 6144,
+        b"D" * 6144,
+        b"E" * 1024,
+    ]
+    info = {
+        "url": "https://e-cdns-proxy-a.dzcdn.net/mobile/1/abc",
+        "id": 456,
+        "quality": 2,
+        "quality_to_size": [0, 0, 25600],
+    }
+    downloadable = DeezerDownloadable(_FakeSession(chunks), info)
+    callback_calls: list[int] = []
+    output_path = tmp_path / "out_small_tail.bin"
+
+    with patch.object(
+        DeezerDownloadable,
+        "_decrypt_chunk",
+        side_effect=lambda _key, data: data,
+    ) as decrypt:
+        await downloadable._download(str(output_path), callback_calls.append)
+
+    assert output_path.read_bytes() == b"".join(chunks)
+    assert sum(callback_calls) == len(b"".join(chunks))
+    # 4 full 6144-byte groups → 4 decrypt calls; the 1024-byte tail is raw
+    assert decrypt.call_count == 4
+
+
 # ===== INTEGRATION TEST =====
 
 

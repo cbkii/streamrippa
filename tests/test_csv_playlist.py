@@ -1194,6 +1194,7 @@ async def test_telemetry_jsonl_disabled_does_not_write(tmp_path):
     )
     await pending.resolve()
     assert not telemetry_path.exists()
+    assert not any(tmp_path.iterdir())
 
 
 def test_provider_threshold_invalid_value_logs_warning(caplog):
@@ -1211,7 +1212,7 @@ def test_provider_threshold_invalid_value_logs_warning(caplog):
 
 @pytest.mark.parametrize(
     ("configured_value", "expected"),
-    [("42", 42), (42, 42), (True, 50), ("", 50), (-5, 50), (150, 50)],
+    [("42", 42), (42, 42), (True, 50), (False, 50), ("", 50), (-5, 50), (150, 50)],
 )
 def test_provider_threshold_coercion_edges(configured_value, expected, caplog):
     cfg = _make_config()
