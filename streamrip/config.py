@@ -178,6 +178,14 @@ class CsvResolverConfig:
     year_ignore_for_remaster: bool
     # Reject obvious junk-context releases (karaoke, tribute, commentary, etc.)
     reject_bad_context_releases: bool
+    # Include-only fields for bad-context scanning. Supported: title, album, version, subtitle, display_title
+    bad_context_fields: list[str]
+    # Optional per-provider acceptance thresholds; fallback to resolver defaults when missing.
+    acceptance_threshold_by_source: dict[str, int]
+    # Optional path for machine-readable candidate telemetry JSONL.
+    telemetry_jsonl_path: str
+    # Optional fuzzy fallback in normal mode; guarded by strict checks.
+    enable_guarded_fuzzy_normal: bool
 
 
 @dataclass(slots=True)

@@ -10,14 +10,21 @@ Supports three modes:
 from __future__ import annotations
 
 import csv
+import functools
 import json
+import logging
+import os
 import re
 import warnings
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
+
+logger = logging.getLogger("streamrip")
 
 # Columns that must be present in the first row to identify an Exportify CSV.
 # Other columns are optional and ignored when missing.
@@ -78,11 +85,17 @@ class MatchPolicy:
     remaster_mode: str = "equivalent"
     year_ignore_for_remaster: bool = True
     reject_bad_context_releases: bool = True
+    bad_context_fields: tuple[str, ...] = ("title", "album")
+    enable_guarded_fuzzy_normal: bool = False
 
     @classmethod
     def from_config(cls, config) -> "MatchPolicy":
         if config is None:
             return cls()
+        # Read the env override once here so it is part of the lru_cache key
+        # inside _resolve_bad_context_fields and stale results are never served
+        # when the env variable changes (e.g. in tests or per-process reload).
+        env_bad_ctx = (os.getenv("STREAMRIP_BAD_CONTEXT_FIELDS") or "").strip()
         return cls(
             enabled=bool(getattr(config, "variant_policy_enabled", True)),
             live_mode=str(getattr(config, "live_mode", "reject")),
@@ -95,6 +108,13 @@ class MatchPolicy:
             ),
             reject_bad_context_releases=bool(
                 getattr(config, "reject_bad_context_releases", True)
+            ),
+            bad_context_fields=_resolve_bad_context_fields(
+                tuple(getattr(config, "bad_context_fields", ("title", "album")) or ()),
+                env_bad_ctx,
+            ),
+            enable_guarded_fuzzy_normal=bool(
+                getattr(config, "enable_guarded_fuzzy_normal", False)
             ),
         )
 
@@ -355,8 +375,39 @@ _BAD_CONTEXT_MARKERS: tuple[str, ...] = (
 # Variants that allow a bad-context candidate to still be accepted when the
 # CSV row itself explicitly requests one of these types.
 _BAD_CONTEXT_CARVEOUT_VARIANTS: frozenset[str] = frozenset(
-    {"karaoke", "tribute", "commentary"}
+    {"karaoke", "tribute", "commentary", "slowed_sped"}
 )
+_BAD_CONTEXT_SUPPORTED_FIELDS: frozenset[str] = frozenset(
+    {"title", "album", "artist", "version", "subtitle", "display_title"}
+)
+# Pre-compiled pattern for bad-context marker scanning; sorted longest-first so
+# multi-word phrases (e.g. "made famous by") are tried before their substrings.
+_BAD_CONTEXT_PATTERN: re.Pattern[str] = re.compile(
+    r"\b("
+    + "|".join(
+        re.escape(m) for m in sorted(_BAD_CONTEXT_MARKERS, key=len, reverse=True)
+    )
+    + r")\b"
+)
+
+
+@dataclass(slots=True, frozen=True)
+class CandidateExplanation:
+    score: int
+    reason_codes: tuple[str, ...]
+    signals: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        # Wrap signals in a MappingProxyType to prevent callers from mutating
+        # the "immutable" explanation after construction.  A shallow copy is
+        # taken first so the caller's original dict is not aliased.
+        object.__setattr__(
+            self,
+            "signals",
+            MappingProxyType(dict(self.signals)),
+        )
+
+
 _CORE_STRIP_MARKERS: frozenset[str] = frozenset(
     {
         "live",
@@ -464,13 +515,70 @@ def _parse_title(text: str) -> ParsedTitle:
     )
 
 
-def _contains_bad_context(title: str, album: str, artist: str) -> bool:
-    full = _normalise(" ".join([title or "", album or "", artist or ""]))
+@functools.lru_cache(maxsize=64)
+def _resolve_bad_context_fields(
+    config_fields: tuple[str, ...] | None,
+    env_override: str = "",
+) -> tuple[str, ...]:
+    """Resolve the effective set of bad-context fields to scan.
+
+    ``env_override`` must be passed explicitly (read by the caller from
+    ``STREAMRIP_BAD_CONTEXT_FIELDS``) so that it is part of the ``lru_cache``
+    key and stale results are never returned when the env changes.
+    """
+    raw_fields: list[str]
+    if env_override:
+        raw_fields = [
+            p.strip().casefold() for p in env_override.split(",") if p.strip()
+        ]
+    else:
+        raw_fields = [
+            str(v).strip().casefold() for v in (config_fields or ()) if str(v).strip()
+        ]
+    if not raw_fields:
+        return ("title", "album")
+
+    resolved: list[str] = []
+    for field in raw_fields:
+        if field not in _BAD_CONTEXT_SUPPORTED_FIELDS:
+            logger.warning("Ignoring unknown bad-context field '%s'", field)
+            continue
+        if field not in resolved:
+            resolved.append(field)
+    return tuple(resolved) if resolved else ("title", "album")
+
+
+def _contains_bad_context_fields(
+    candidate_title: str,
+    candidate_album: str,
+    candidate_artist: str,
+    *,
+    bad_context_fields: tuple[str, ...],
+) -> bool:
+    # "version", "subtitle", and "display_title" are all facets of the
+    # track title field in different provider schemas; they share the same
+    # backing value so the deduplication loop below avoids scanning it twice.
+    field_values: dict[str, str] = {
+        "title": candidate_title,
+        "album": candidate_album,
+        "version": candidate_title,
+        "subtitle": candidate_title,
+        "display_title": candidate_title,
+        "artist": candidate_artist,
+    }
+    # Deduplicate backing values so the same string isn't scanned multiple times
+    # (e.g. "title", "version", and "subtitle" all resolve to candidate_title).
+    seen_values: set[str] = set()
+    parts: list[str] = []
+    for field in bad_context_fields:
+        value = field_values.get(field, "")
+        if value and value not in seen_values:
+            seen_values.add(value)
+            parts.append(value)
+    full = _normalise(" ".join(parts))
     if not full:
         return False
-    return any(
-        re.search(rf"\b{re.escape(marker)}\b", full) for marker in _BAD_CONTEXT_MARKERS
-    )
+    return bool(_BAD_CONTEXT_PATTERN.search(full))
 
 
 def _variant_mode(policy: MatchPolicy, marker: str) -> str:
@@ -531,6 +639,217 @@ def _variant_policy_penalty(
     return penalty, reject
 
 
+def _score_candidate_internal(
+    row: "ExportifyCsvRow",
+    candidate_title: str,
+    candidate_artist: str,
+    candidate_album: str,
+    candidate_date: str,
+    candidate_isrc: str,
+    candidate_duration_ms: int | None = None,
+    policy: MatchPolicy | None = None,
+    *,
+    allow_guarded_fuzzy: bool = True,
+) -> CandidateExplanation:
+    policy = policy or MatchPolicy()
+    reasons: list[str] = []
+    row_title = _parse_title(row.track_name)
+    cand_title = _parse_title(candidate_title)
+    signals: dict[str, object] = {
+        "isrc_match": bool(
+            row.isrc and candidate_isrc and row.isrc.upper() == candidate_isrc.upper()
+        ),
+        "row_variants": sorted(row_title.variants),
+        "candidate_variants": sorted(cand_title.variants),
+        "title_exact": False,
+        "title_core": False,
+        "title_fuzzy_guarded": False,
+    }
+
+    if row.isrc and candidate_isrc and row.isrc.upper() == candidate_isrc.upper():
+        has_bad_context = (
+            policy.enabled
+            and policy.reject_bad_context_releases
+            and _contains_bad_context_fields(
+                candidate_title,
+                candidate_album,
+                candidate_artist,
+                bad_context_fields=policy.bad_context_fields,
+            )
+        )
+        if has_bad_context and not row_title.variants.intersection(
+            _BAD_CONTEXT_CARVEOUT_VARIANTS
+        ):
+            return CandidateExplanation(
+                score=0,
+                reason_codes=("reject_bad_context",),
+                signals=signals,
+            )
+        return CandidateExplanation(
+            score=100,
+            reason_codes=("accepted_isrc_match",),
+            signals=signals,
+        )
+
+    if not row_title.normalized or not cand_title.normalized:
+        return CandidateExplanation(
+            score=0, reason_codes=("reject_empty_title",), signals=signals
+        )
+
+    exact_title = row_title.normalized == cand_title.normalized
+    core_title_match = (
+        bool(row_title.core_title)
+        and bool(cand_title.core_title)
+        and row_title.core_title == cand_title.core_title
+    )
+    signals["title_exact"] = exact_title
+    signals["title_core"] = core_title_match
+    guarded_fuzzy_match = False
+    if not exact_title and not core_title_match:
+        if allow_guarded_fuzzy and policy.enable_guarded_fuzzy_normal:
+            fuzzy_ratio = SequenceMatcher(
+                None, row_title.normalized, cand_title.normalized
+            ).ratio()
+            signals["title_similarity"] = round(fuzzy_ratio, 4)
+            artist_ok = _artist_overlap(row.artists_list, candidate_artist)
+            album_ok = bool(
+                row.album
+                and candidate_album
+                and _normalise_variant_text(row.album)
+                and (
+                    _normalise_variant_text(row.album)
+                    in _normalise_variant_text(candidate_album)
+                    or _normalise_variant_text(candidate_album)
+                    in _normalise_variant_text(row.album)
+                )
+            )
+            duration_ok = bool(
+                row.duration_ms
+                and candidate_duration_ms
+                and abs(row.duration_ms - candidate_duration_ms) <= 8000
+            )
+            guarded_fuzzy_match = (
+                fuzzy_ratio >= 0.90 and artist_ok and (album_ok or duration_ok)
+            )
+            signals["title_fuzzy_guarded"] = guarded_fuzzy_match
+        if not guarded_fuzzy_match:
+            return CandidateExplanation(
+                score=0, reason_codes=("reject_title_mismatch",), signals=signals
+            )
+
+    if (
+        policy.enabled
+        and policy.reject_bad_context_releases
+        and _contains_bad_context_fields(
+            candidate_title,
+            candidate_album,
+            candidate_artist,
+            bad_context_fields=policy.bad_context_fields,
+        )
+    ):
+        if not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS):
+            return CandidateExplanation(
+                score=0, reason_codes=("reject_bad_context",), signals=signals
+            )
+
+    score = 27
+    if exact_title:
+        score += 10
+    if core_title_match:
+        score += 8
+    if guarded_fuzzy_match:
+        score += 6
+        # NOTE: `reasons` accumulates only on the accept path.  Rejection
+        # branches (e.g. reject_artist_mismatch, reject_duration_far) return
+        # their own single-element reason_codes, so signals such as
+        # "title_fuzzy_guarded" may be True in telemetry without a corresponding
+        # accept reason code.
+        reasons.append("accepted_guarded_fuzzy")
+
+    coverage = _artist_coverage(row.artists_list, candidate_artist)
+    signals["artist_coverage"] = round(coverage, 3)
+    if coverage >= 1.0:
+        score += 26
+    elif coverage >= 0.5:
+        score += 14
+    elif _artist_overlap(row.artists_list, candidate_artist):
+        score += 8
+    else:
+        weak_context = False
+        if row.album and candidate_album and (core_title_match or guarded_fuzzy_match):
+            row_album_norm = _normalise_variant_text(row.album)
+            cand_album_norm = _normalise_variant_text(candidate_album)
+            weak_context = bool(
+                row_album_norm
+                and cand_album_norm
+                and (
+                    row_album_norm == cand_album_norm
+                    or row_album_norm in cand_album_norm
+                    or cand_album_norm in row_album_norm
+                )
+            )
+        if not weak_context:
+            return CandidateExplanation(
+                score=0, reason_codes=("reject_artist_mismatch",), signals=signals
+            )
+        score -= 10
+        reasons.append("penalty_weak_artist_context")
+
+    if row.album and candidate_album:
+        row_album = _normalise_variant_text(row.album)
+        cand_album = _normalise_variant_text(candidate_album)
+        if row_album and cand_album:
+            if row_album == cand_album:
+                score += 4
+            elif row_album in cand_album or cand_album in row_album:
+                score += 2
+
+    _year_ignore_variants = ("remaster", "live", "remix")
+    row_has_variant = any(v in row_title.variants for v in _year_ignore_variants)
+    cand_has_variant = any(v in cand_title.variants for v in _year_ignore_variants)
+    if not (
+        policy.enabled
+        and policy.year_ignore_for_remaster
+        and (row_has_variant or cand_has_variant)
+    ):
+        score += _year_bonus(row.release_date, candidate_date)
+
+    variant_penalty, reject_variant = _variant_policy_penalty(
+        row_title.variants,
+        cand_title.variants,
+        policy,
+    )
+    signals["variant_penalty"] = variant_penalty
+    if reject_variant and row_title.variants != cand_title.variants:
+        return CandidateExplanation(
+            score=0, reason_codes=("reject_variant_policy",), signals=signals
+        )
+    if row_title.variants and row_title.variants.issubset(cand_title.variants):
+        score += 8
+    score -= variant_penalty
+
+    if row.duration_ms and candidate_duration_ms:
+        delta = abs(row.duration_ms - candidate_duration_ms)
+        signals["duration_delta_ms"] = delta
+        if delta <= 2500:
+            score += 10
+        elif delta <= 6000:
+            score += 4
+        elif delta <= 12000:
+            score += 1
+        elif delta >= 25000:
+            return CandidateExplanation(
+                score=0, reason_codes=("reject_duration_far",), signals=signals
+            )
+        elif delta >= 15000:
+            score -= 14
+        else:
+            score -= 6
+    return CandidateExplanation(
+        score=max(score, 1), reason_codes=tuple(reasons), signals=signals
+    )
+
+
 def score_candidate(
     row: "ExportifyCsvRow",
     candidate_title: str,
@@ -544,10 +863,14 @@ def score_candidate(
     """
     Score how well a search-result candidate matches a CSV row from an Exportify export.
 
-    Uses deterministic heuristics combining ISRC, title, artist, album and release year:
+    Uses deterministic heuristics combining ISRC, title, artist, album, duration and release year:
     - Exact ISRC match yields 100.
-    - Requires either exact normalised title match or exact normalised-variant title match to produce a non-zero score.
+    - Requires either an exact normalised title match, an exact normalised-variant
+      ("core") title match, or — when ``policy.enable_guarded_fuzzy_normal`` is
+      true — a guarded fuzzy normalised-title match (similarity ≥ 0.90 plus
+      artist overlap and album/duration agreement) to produce a non-zero score.
     - Base score for title match is 27, with bonuses for exact normalised title, artist coverage, album match, and year; penalties for variant/edition mismatches.
+    - ``candidate_duration_ms`` is used for album/duration agreement in the guarded-fuzzy path and for duration-mismatch penalties.
     - Minimum positive score for matching titles is 1.
 
     Parameters:
@@ -557,128 +880,22 @@ def score_candidate(
         candidate_album (str): Candidate album string to compare.
         candidate_date (str): Candidate release date string to compare for year bonus.
         candidate_isrc (str): Candidate ISRC code for exact-match short-circuit.
+        candidate_duration_ms (int | None): Candidate duration in milliseconds, used for duration agreement and mismatch penalties.
 
     Returns:
         int: Numeric match score. `100` indicates exact ISRC match; `0` indicates no title match; otherwise a positive score (at least `1`) representing match strength.
     """
-    policy = policy or MatchPolicy()
-
-    if row.isrc and candidate_isrc:
-        if row.isrc.upper() == candidate_isrc.upper():
-            # ISRC still requires sane identity context to avoid absurd mismatches,
-            # but only when the policy is enabled and configured to do so.
-            if (
-                policy.enabled
-                and policy.reject_bad_context_releases
-                and _contains_bad_context(
-                    candidate_title, candidate_album, candidate_artist
-                )
-            ):
-                row_title_parsed = _parse_title(row.track_name)
-                if not row_title_parsed.variants.intersection(
-                    _BAD_CONTEXT_CARVEOUT_VARIANTS
-                ):
-                    return 0
-            return 100
-
-    row_title = _parse_title(row.track_name)
-    cand_title = _parse_title(candidate_title)
-    if not row_title.normalized or not cand_title.normalized:
-        return 0
-
-    exact_title = row_title.normalized == cand_title.normalized
-    core_title_match = (
-        bool(row_title.core_title)
-        and bool(cand_title.core_title)
-        and row_title.core_title == cand_title.core_title
-    )
-    if not exact_title and not core_title_match:
-        return 0
-
-    if (
-        policy.enabled
-        and policy.reject_bad_context_releases
-        and _contains_bad_context(candidate_title, candidate_album, candidate_artist)
-    ):
-        if not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS):
-            return 0
-
-    score = 27
-    if exact_title:
-        score += 10
-    if core_title_match:
-        score += 8
-
-    coverage = _artist_coverage(row.artists_list, candidate_artist)
-    if coverage >= 1.0:
-        score += 26
-    elif coverage >= 0.5:
-        score += 14
-    elif _artist_overlap(row.artists_list, candidate_artist):
-        score += 8
-    else:
-        weak_context = False
-        if row.album and candidate_album and core_title_match:
-            row_album_norm = _normalise_variant_text(row.album)
-            cand_album_norm = _normalise_variant_text(candidate_album)
-            weak_context = bool(
-                row_album_norm
-                and cand_album_norm
-                and (
-                    row_album_norm == cand_album_norm
-                    or row_album_norm in cand_album_norm
-                    or cand_album_norm in row_album_norm
-                )
-            )
-        if not weak_context:
-            return 0
-        score -= 10
-
-    if row.album and candidate_album:
-        row_album = _normalise_variant_text(row.album)
-        cand_album = _normalise_variant_text(candidate_album)
-        if row_album and cand_album:
-            if row_album == cand_album:
-                score += 4
-            elif row_album in cand_album or cand_album in row_album:
-                score += 2
-
-    row_has_remaster = "remaster" in row_title.variants
-    cand_has_remaster = "remaster" in cand_title.variants
-    if not (
-        policy.enabled
-        and policy.year_ignore_for_remaster
-        and (row_has_remaster or cand_has_remaster)
-    ):
-        score += _year_bonus(row.release_date, candidate_date)
-
-    variant_penalty, reject_variant = _variant_policy_penalty(
-        row_title.variants,
-        cand_title.variants,
-        policy,
-    )
-    if reject_variant and row_title.variants != cand_title.variants:
-        return 0
-    if row_title.variants and row_title.variants.issubset(cand_title.variants):
-        score += 8
-    score -= variant_penalty
-
-    if row.duration_ms and candidate_duration_ms:
-        delta = abs(row.duration_ms - candidate_duration_ms)
-        if delta <= 2500:
-            score += 10
-        elif delta <= 6000:
-            score += 4
-        elif delta <= 12000:
-            score += 1
-        elif delta >= 25000:
-            return 0
-        elif delta >= 15000:
-            score -= 14
-        else:
-            score -= 6
-
-    return max(score, 1)
+    return _score_candidate_internal(
+        row,
+        candidate_title,
+        candidate_artist,
+        candidate_album,
+        candidate_date,
+        candidate_isrc,
+        candidate_duration_ms,
+        policy=policy,
+        allow_guarded_fuzzy=True,
+    ).score
 
 
 def score_candidate_repair(
@@ -752,21 +969,93 @@ def score_candidate_repair(
         )
         if reject_variant and row_parsed.variants != cand_parsed.variants:
             return 0
-        if policy.reject_bad_context_releases and _contains_bad_context(
-            candidate_title, candidate_album, candidate_artist
+        if policy.reject_bad_context_releases and _contains_bad_context_fields(
+            candidate_title,
+            candidate_album,
+            candidate_artist,
+            bad_context_fields=policy.bad_context_fields,
         ):
-            if not row_parsed.variants.intersection(
-                {"karaoke", "tribute", "commentary"}
-            ):
+            if not row_parsed.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS):
                 return 0
 
     return score
+
+
+def explain_candidate_score(
+    row: "ExportifyCsvRow",
+    candidate_title: str,
+    candidate_artist: str,
+    candidate_album: str,
+    candidate_date: str,
+    candidate_isrc: str,
+    candidate_duration_ms: int | None = None,
+    policy: MatchPolicy | None = None,
+) -> CandidateExplanation:
+    """Return a detailed scoring explanation for a search-result candidate.
+
+    Delegates to :func:`_score_candidate_internal` with ``allow_guarded_fuzzy=True``,
+    exposing the full :class:`CandidateExplanation` shape rather than just the
+    integer score.
+
+    Parameters:
+        row (ExportifyCsvRow): CSV row to match against.
+        candidate_title (str): Candidate track title.
+        candidate_artist (str): Candidate artist string.
+        candidate_album (str): Candidate album string.
+        candidate_date (str): Candidate release date string.
+        candidate_isrc (str): Candidate ISRC code.
+        candidate_duration_ms (int | None): Candidate duration in milliseconds (optional).
+        policy (MatchPolicy | None): Matching policy; defaults to ``MatchPolicy()`` when ``None``.
+
+    Returns:
+        CandidateExplanation: Named tuple with:
+          - ``score``: integer match score (0 = rejected, 100 = exact ISRC match).
+          - ``reason_codes``: tuple of strings explaining the outcome (e.g.
+            ``"accepted_isrc_match"``, ``"reject_bad_context"``,
+            ``"accepted_guarded_fuzzy"``).
+          - ``signals``: read-only mapping of intermediate scoring signals
+            (e.g. ``"title_exact"``, ``"artist_coverage"``, ``"duration_delta_ms"``).
+    """
+    return _score_candidate_internal(
+        row,
+        candidate_title,
+        candidate_artist,
+        candidate_album,
+        candidate_date,
+        candidate_isrc,
+        candidate_duration_ms,
+        policy=policy,
+        allow_guarded_fuzzy=True,
+    )
 
 
 def is_usable_exportify_row(row: ExportifyCsvRow) -> bool:
     """Whether a CSV row has enough base identity fields to be resolved."""
     return bool(row.track_name.strip()) and bool(
         row.artists_raw.strip() or row.artists_list
+    )
+
+
+def _warn_incomplete_override(
+    source_row_index: int,
+    track_name_hint: str,
+    kind: str,
+    src: str,
+    cand_id: str,
+) -> None:
+    """Log a warning when only one half of a primary or fallback override pair is set."""
+    logger.warning(
+        "Row %d (%r): incomplete %s override "
+        "(override_%s_source=%r, override_%s_candidate_id=%r); "
+        "ignoring override and keeping original %s fields",
+        source_row_index,
+        track_name_hint,
+        kind,
+        kind,
+        src,
+        kind,
+        cand_id,
+        kind,
     )
 
 
@@ -809,6 +1098,40 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
             fallback_source = (row.get("fallback_source") or "").strip()
             primary_candidate_id = (row.get("primary_candidate_id") or "").strip()
             fallback_candidate_id = (row.get("fallback_candidate_id") or "").strip()
+            override_primary_source = (row.get("override_primary_source") or "").strip()
+            override_primary_id = (
+                row.get("override_primary_candidate_id") or ""
+            ).strip()
+            override_fallback_source = (
+                row.get("override_fallback_source") or ""
+            ).strip()
+            override_fallback_id = (
+                row.get("override_fallback_candidate_id") or ""
+            ).strip()
+            track_name_hint = (row.get("track_name") or "").strip()
+
+            if override_primary_source and override_primary_id:
+                primary_source = override_primary_source
+                primary_candidate_id = override_primary_id
+            elif override_primary_source or override_primary_id:
+                _warn_incomplete_override(
+                    source_row_index,
+                    track_name_hint,
+                    "primary",
+                    override_primary_source,
+                    override_primary_id,
+                )
+            if override_fallback_source and override_fallback_id:
+                fallback_source = override_fallback_source
+                fallback_candidate_id = override_fallback_id
+            elif override_fallback_source or override_fallback_id:
+                _warn_incomplete_override(
+                    source_row_index,
+                    track_name_hint,
+                    "fallback",
+                    override_fallback_source,
+                    override_fallback_id,
+                )
             if primary_source and primary_candidate_id:
                 repair_candidate_ids = {primary_source: primary_candidate_id}
             if fallback_source and fallback_candidate_id:

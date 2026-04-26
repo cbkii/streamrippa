@@ -633,6 +633,20 @@ def test_remaster_equivalent_default_accepts_with_year_deemphasis():
     assert abs(remaster - plain) <= 20
 
 
+def test_live_context_deemphasizes_year_difference():
+    row = _make_row(title="My Song (Live)", artists=["Artist A"], date="1991")
+    live = score_candidate(
+        row,
+        "My Song (Live)",
+        "Artist A",
+        "Live Album",
+        "2023",
+        "",
+        policy=MatchPolicy(),
+    )
+    assert live > 0
+
+
 def test_radio_edit_policy_controls_acceptance():
     row = _make_row(title="My Song", artists=["Artist A"])
     reject_policy = MatchPolicy(radio_edit_mode="reject")
@@ -817,3 +831,45 @@ def test_remix_alias_still_detected():
         "",
     )
     assert score == 0
+
+
+def test_bad_context_fields_excludes_artist_by_default():
+    row = _make_row(title="Track", artists=["Karaoke Artist"])
+    score = score_candidate(
+        row,
+        "Track",
+        "Karaoke Artist",
+        "Album",
+        "",
+        "",
+        policy=MatchPolicy(),
+    )
+    assert score > 0
+
+
+def test_bad_context_fields_env_override_respected(monkeypatch):
+    monkeypatch.setenv("STREAMRIP_BAD_CONTEXT_FIELDS", "title,album,unknown_field")
+    policy = MatchPolicy.from_config(
+        type("Cfg", (), {"bad_context_fields": ["artist"]})()
+    )
+    assert policy.bad_context_fields == ("title", "album")
+
+
+def test_guarded_fuzzy_normal_mode_accepts_high_similarity_with_strong_context():
+    row = _make_row(
+        title="Dancing In The Moonlight",
+        artists=["Toploader"],
+        album="Onka's Big Moka",
+        duration_ms=230000,
+    )
+    score = score_candidate(
+        row,
+        "Dancin In The Moonlight",
+        "Toploader",
+        "Onka's Big Moka",
+        "2000",
+        "",
+        229000,
+        policy=MatchPolicy(enable_guarded_fuzzy_normal=True),
+    )
+    assert score > 0
