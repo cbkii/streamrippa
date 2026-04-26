@@ -85,6 +85,8 @@ class AlbumMetadata:
         album = resp.get("title", "Unknown Album")
         tracktotal = resp.get("tracks_count", 1)
         genre = safe_get(resp, "genres_list") or []
+        if not isinstance(genre, list):
+            genre = []
         if not genre:
             genre_name = safe_get(resp, "genre", "name")
             genre = [genre_name] if isinstance(genre_name, str) and genre_name else []

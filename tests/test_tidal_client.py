@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock
 
 import aiohttp
@@ -19,7 +20,7 @@ from streamrip.exceptions import NonStreamableError
         asyncio.TimeoutError(),
     ],
 )
-async def test_get_metadata_ignores_track_lyrics_errors(error):
+async def test_get_metadata_ignores_track_lyrics_errors(error, caplog):
     client = TidalClient(Config.defaults())
     client._api_request = AsyncMock(
         side_effect=[
@@ -28,6 +29,9 @@ async def test_get_metadata_ignores_track_lyrics_errors(error):
         ]
     )
 
-    result = await client.get_metadata("123", "track")
+    with caplog.at_level(logging.WARNING, logger="streamrip"):
+        result = await client.get_metadata("123", "track")
 
     assert result == {"id": "123", "title": "Track"}
+    assert client._api_request.await_count == 2
+    assert "Failed to get lyrics for 123" in caplog.text
