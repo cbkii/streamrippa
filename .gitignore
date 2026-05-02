@@ -25,7 +25,6 @@ env/
 .hypothesis/
 .tox/
 .nox/
-*test.py
 
 # Coverage
 .coverage

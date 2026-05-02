@@ -98,6 +98,47 @@ rip
 
 it should show the main help page. If you have no idea what these mean, or are having other issues installing, check out the [detailed installation instructions](https://github.com/nathom/streamrip/wiki#detailed-installation-instructions).
 
+
+## Development from source
+
+For contributors working from a local clone:
+
+```bash
+git clone https://github.com/cbkii/streamrippa.git
+cd streamrippa
+poetry install
+poetry run rip --help
+```
+
+Run local validation checks:
+
+```bash
+poetry run pytest
+poetry run ruff check .
+poetry run ruff format --check .
+```
+
+Contributor workflow details live in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+## Runtime paths and generated files
+
+By default, streamrip stores config/databases in the app config directory and media in a downloads folder:
+
+- Config: `~/.config/streamrip/config.toml`
+- Downloads DB: `~/.config/streamrip/downloads.db`
+- Failed downloads DB: `~/.config/streamrip/failed_downloads.db`
+- Failed downloads CSV log: `~/.config/streamrip/failed_downloads.csv`
+- Default media folder: `~/StreamripDownloads`
+
+For safe experimentation, use `--config-path` and point `[downloads]` / `[database]` paths to sandbox locations.
+
+## Troubleshooting quick reference
+
+- SSL errors: validate system certificates first; use `--no-ssl-verify` only as a temporary workaround.
+- Authentication failures (Qobuz/Tidal/Deezer): refresh credentials via `rip config` and verify token/cookie fields.
+- Slow or flaky downloads: tune `[reliability]` retry/backoff and `[downloads]` concurrency/timeouts.
+- Conversion issues: ensure `ffmpeg` is installed and accessible on `PATH`.
+
 ## Example Usage
 
 **For Tidal and Qobuz, you NEED a premium subscription.**

@@ -7,7 +7,7 @@ license = "GPL-3.0-only"
 readme = "README.md"
 homepage = "https://github.com/cbkii/streamrippa"
 repository = "https://github.com/cbkii/streamrippa"
-include = ["src/config.toml"]
+include = ["streamrip/config.toml"]
 keywords = ["hi-res", "free", "music", "download"]
 classifiers = [
   "License :: OSI Approved :: GNU General Public License (GPL)",
@@ -46,9 +46,6 @@ certifi = { version = "^2025.1.31", optional = true }
 types-click = "^7.1.2"
 types-Pillow = "^8.3.1"
 ruff = "0.1.15"
-black = ">=24,<27"
-isort = "^5.9.3"
-flake8 = "^3.9.2"
 setuptools = ">=67.4,<79.0"
 pytest = ">=7.4,<10.0"
 pytest-mock = "^3.11.1"
