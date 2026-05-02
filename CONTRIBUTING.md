@@ -71,7 +71,7 @@ For safe local development/testing, prefer overriding locations via `--config-pa
 - Keep metadata/tagging best-effort: failures should not fail successful downloads.
 - Avoid unbounded concurrency for large lists; follow existing batching/semaphore patterns.
 
-See `AGENTS.md` for full engineering policy and change-control rules.
+See [AGENTS.md](./AGENTS.md) for full engineering policy and change-control rules.
 
 ## 5) Troubleshooting quick notes
 
