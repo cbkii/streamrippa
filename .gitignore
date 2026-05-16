@@ -44,6 +44,9 @@ Thumbs.db
 .env.*
 *.local
 secrets.py
+*.secrets
+.secrets/
+secrets/
 
 # Repo-local scratch / temp
 /tmp/
