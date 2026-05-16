@@ -57,16 +57,54 @@ sudo apt install -y build-essential python3-dev libffi-dev
 > On Debian, Ubuntu, and Raspberry Pi OS, installing with `pip3` into the system Python may fail with an `externally-managed-environment` error. A virtual environment avoids this.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install /path/to/streamrip-<version>-py3-none-any.whl
+export VENV_DIR="$HOME/.venv/streamrippa"
+
+# Use relase asset URL -or- downloaded file path:
+# export WHEEL_FILE="https://github.com/cbkii/streamrippa/releases/download/v2.3.3/streamrip-2.3.3-py3-none-any.whl"
+export WHEEL_FILE="/path/to/streamrip-<version>-py3-none-any.whl"
+
+python3 -m venv "$VENV_DIR"
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
+"$VENV_DIR/bin/python" -m pip install --upgrade "$WHEEL_FILE"
+"$VENV_DIR/bin/python" -m pip check
+"$VENV_DIR/bin/rip" --version
+
+# Verify:
+"$VENV_DIR/bin/python" -m pip check
+"$VENV_DIR/bin/rip" --version
 ```
 
-Or install directly from a release asset URL:
+## Optional: make rip available without activating the venv
 
+Because type -a rip currently shows nothing, direct calls work only via: "$HOME/.venv/streamrippa/bin/rip"
+That is clean and **safest for scripts/systemd**.
+
+For interactive shell convenience, add a user-local wrapper:
 ```bash
-python -m pip install "https://github.com/cbkii/streamrippa/releases/download/v<version>/streamrip-<version>-py3-none-any.whl"
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/rip" <<'EOF'
+#!/usr/bin/env bash
+exec "$HOME/.venv/streamrippa/bin/rip" "$@"
+EOF
+chmod +x "$HOME/.local/bin/rip"
+
+# Make sure it's in path
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc" ;;
+esac
+
+hash -r
+
+# Then either open a new shell or run:
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+type -a rip
+rip --version
+
+## Expected (example):
+# rip is /home/username/.local/bin/rip
+# rip, version 1.2.3
 ```
 
 ### Verify
