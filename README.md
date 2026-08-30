@@ -473,3 +473,23 @@ I will not be responsible for how **you** use `streamrip`. By using `streamrip`,
 ## Sponsorship
 
 Consider becoming a Github sponsor for [nathom](https://github.com/sponsors/nathom), the original author of `streamrip`, if you enjoy this open source software.
+
+
+## CSV resolver matching reliability
+
+Exportify CSV resolution uses **broad candidate discovery with strict candidate
+acceptance**. Queries start with ISRC/title/artist/album identity, then relax
+progressively to alternate term order and bounded title-only discovery when a
+provider search is too literal. Candidates from multiple query strategies are
+ranked together instead of accepting the first marginal match.
+
+Provider naming differences such as `Hard Twelve` versus `Hard Twelve (The
+Ante)` can be accepted as a neutral title extension only when artist identity
+and album or duration evidence also agree. Material alternatives such as
+`Hard Twelve (Live)`, acoustic/instrumental/remix versions, karaoke/tribute
+entries, and large duration conflicts remain guarded by variant/context rules.
+
+The Exportify parser also accepts common equivalent columns including `Album
+Release Date`, `Track Duration (ms)`, `Artist Genres`, and `Track ISRC`.
+Detailed per-query attempts and rejection signals are available through the CSV
+resolver telemetry/unresolved diagnostics.

@@ -12,6 +12,7 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from http.client import HTTPException
 from typing import Any, Callable, Optional
 
 import aiofiles
@@ -37,6 +38,38 @@ def generate_temp_path(url: str):
     )
 
 
+def _is_excessive_headers_error(exc: BaseException) -> bool:
+    """Return whether *exc* wraps http.client's 100-header parser failure.
+
+    Requests commonly exposes this condition as a ConnectionError whose nested
+    argument is ``HTTPException('got more than 100 headers')``. Walk exception
+    causes/contexts and exception-valued args so the classification is stable
+    across urllib3/requests wrapping layers without matching unrelated network
+    failures.
+    """
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+
+        if (
+            isinstance(current, HTTPException)
+            and "more than 100 headers" in str(current).casefold()
+        ):
+            return True
+
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+    return False
+
+
 async def fast_async_download(path, url, headers, callback):
     """Synchronous download with yield for every 1MB read.
 
@@ -54,12 +87,32 @@ async def fast_async_download(path, url, headers, callback):
             allow_redirects=True,
             stream=True,
         ) as resp:
+            resp.raise_for_status()
             for chunk in resp.iter_content(chunk_size=chunk_size):
+                if not chunk:
+                    continue
                 file.write(chunk)
                 callback(len(chunk))
                 if counter % yield_every == 0:
                     await asyncio.sleep(0)
                 counter += 1
+
+
+async def _aiohttp_stream_download(
+    path: str,
+    url: str,
+    session: aiohttp.ClientSession,
+    callback: Callable[[int], Any],
+) -> None:
+    """Stream a BasicDownloadable through aiohttp as a parser fallback."""
+    async with session.get(url, allow_redirects=True) as response:
+        response.raise_for_status()
+        async with aiofiles.open(path, "wb") as file:
+            async for chunk in response.content.iter_chunked(2**17):
+                if not chunk:
+                    continue
+                await file.write(chunk)
+                callback(len(chunk))
 
 
 @dataclass(slots=True)
@@ -113,7 +166,17 @@ class BasicDownloadable(Downloadable):
         self.source: str = source or "Unknown"
 
     async def _download(self, path: str, callback):
-        await fast_async_download(path, self.url, self.session.headers, callback)
+        try:
+            await fast_async_download(path, self.url, self.session.headers, callback)
+        except Exception as exc:
+            if not _is_excessive_headers_error(exc):
+                raise
+            logger.warning(
+                "requests/http.client rejected stream headers for %s; "
+                "retrying this transfer once via aiohttp",
+                self.source,
+            )
+            await _aiohttp_stream_download(path, self.url, self.session, callback)
 
 
 class DeezerDownloadable(Downloadable):
