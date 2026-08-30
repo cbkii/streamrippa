@@ -93,9 +93,6 @@ class MatchPolicy:
     def from_config(cls, config) -> "MatchPolicy":
         if config is None:
             return cls()
-        # Read the env override once here so it is part of the lru_cache key
-        # inside _resolve_bad_context_fields and stale results are never served
-        # when the env variable changes (e.g. in tests or per-process reload).
         env_bad_ctx = (os.getenv("STREAMRIP_BAD_CONTEXT_FIELDS") or "").strip()
         return cls(
             enabled=bool(getattr(config, "variant_policy_enabled", True)),
@@ -152,10 +149,9 @@ def _split_artist_credits(value: str) -> list[str]:
     """Parse common Exportify artist-credit separators deterministically.
 
     Exportify data in the wild uses both semicolons and commas for multiple
-    artists.  Semicolons are unambiguous and take precedence.  Comma splitting
-    is intentionally retained as a matching aid even for group names containing
-    commas: exact provider credits still contain every resulting token, while
-    search/scoring never accepts a candidate from artist fragments alone.
+    artists. Semicolons are unambiguous and take precedence. Comma splitting is
+    retained as a matching aid; artist fragments are never sufficient on their
+    own to accept a track candidate.
     """
     raw = (value or "").strip()
     if not raw:
@@ -178,18 +174,21 @@ def _split_artist_credits(value: str) -> list[str]:
     return result
 
 
+def _strip_inline_feature_credits(title: str) -> str:
+    """Remove unbracketed trailing feat/ft credits for identity matching."""
+    return re.sub(
+        r"\s+(?:feat(?:uring)?|ft)\.?\s+.+$",
+        "",
+        title or "",
+        flags=re.IGNORECASE,
+    ).strip()
+
+
 def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
     """Parse an Exportify CSV file.
 
     Opens with ``utf-8-sig`` encoding so that a leading BOM is handled
-    transparently.  Unknown columns are ignored.
-
-    Args:
-        path: Path to the CSV file.
-
-    Returns:
-        A ``(playlist_name, rows)`` tuple where *playlist_name* is derived
-        from the CSV filename stem.
+    transparently. Unknown columns are ignored.
     """
     playlist_name = Path(path).stem
     rows: list[ExportifyCsvRow] = []
@@ -220,6 +219,7 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
             except (ValueError, TypeError):
                 duration_ms = None
             track_name = (row.get("Track Name") or "").strip()
+            canonical = _strip_inline_feature_credits(strip_title_decorators(track_name))
 
             rows.append(
                 ExportifyCsvRow(
@@ -240,7 +240,7 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
                     position=position,
                     row_index=i,
                     source_row_index=i,
-                    canonical_track_name=strip_title_decorators(track_name),
+                    canonical_track_name=canonical,
                     duration_ms=duration_ms,
                 )
             )
@@ -280,20 +280,10 @@ def partition_exportify_rows_artist_batched(
 
 
 def detect_file_mode(content: str) -> FileMode:
-    """Detect the file mode from the text content of a file.
-
-    Priority:
-    1. JSON list (``[{…}, …]``)
-    2. Exportify CSV (header row contains the required columns)
-    3. URL list (fallback)
-
-    The function strips a leading UTF-8 BOM before testing.
-    """
-    # Strip BOM if present
+    """Detect the file mode from text content."""
     content = content.lstrip("\ufeff")
     stripped = content.strip()
 
-    # 1. Try JSON
     try:
         parsed = json.loads(stripped)
         if isinstance(parsed, list):
@@ -301,7 +291,6 @@ def detect_file_mode(content: str) -> FileMode:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # 2. Try Exportify CSV header detection
     first_line = stripped.split("\n")[0] if stripped else ""
     try:
         headers = next(csv.reader([first_line]))
@@ -310,17 +299,11 @@ def detect_file_mode(content: str) -> FileMode:
     except StopIteration:
         pass
 
-    # 3. Fallback: URL list
     return "urls"
 
 
 def _normalise(s: str) -> str:
-    """Conservatively normalise catalogue identity text.
-
-    Formatting differences are folded while meaningful words remain available
-    to the title/variant model.  Latin diacritics are folded so provider
-    transliteration differences do not prevent an otherwise strong match.
-    """
+    """Conservatively normalise catalogue identity text."""
     s = unicodedata.normalize("NFKD", s or "")
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = s.casefold().strip()
@@ -350,34 +333,17 @@ def _compact_identity_text(value: str) -> str:
 
 
 def strip_title_decorators(title: str) -> str:
-    """Strip common title decorations while preserving core song identity.
-
-    Conservative behavior:
-    - Remove bracketed/parenthesized featured-artist segments.
-    - Remove trailing inline featured-artist credits.
-    - Remove common trailing variant suffixes (e.g. ``- 2011 Remaster``).
-    """
+    """Strip common title decorations while preserving core song identity."""
     if not title:
         return ""
 
     stripped = title
-    # Drop "(feat. ...)" / "[featuring ...]" blocks entirely.
     stripped = re.sub(
         r"\s*[\(\[]\s*(?:feat(?:uring)?|ft)\.?\s+[^\)\]]*[\)\]]\s*",
         " ",
         stripped,
         flags=re.IGNORECASE,
     )
-    # Also handle unbracketed title credits such as
-    # "So Far To Go feat. Common & D'Angelo".
-    stripped = re.sub(
-        r"\s+(?:feat(?:uring)?|ft)\.?\s+.+$",
-        "",
-        stripped,
-        flags=re.IGNORECASE,
-    )
-
-    # Drop trailing "- Remaster/Live/Edit/Version/Mono/Stereo/Deluxe..." suffixes.
     stripped = re.sub(
         r"\s*[-\u2013\u2014:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
         "",
@@ -402,9 +368,6 @@ def _artist_term_matches(query_artist: str, result_artist: str) -> bool:
         return False
     if query == result:
         return True
-
-    # Short identities such as "CL" must match exactly; arbitrary substring
-    # matching would turn them into frequent false positives.
     if len(query) < 3 or len(result) < 3:
         return False
 
@@ -461,16 +424,12 @@ _BAD_CONTEXT_MARKERS: tuple[str, ...] = (
     "sped up",
     "reverb",
 )
-# Variants that allow a bad-context candidate to still be accepted when the
-# CSV row itself explicitly requests one of these types.
 _BAD_CONTEXT_CARVEOUT_VARIANTS: frozenset[str] = frozenset(
     {"karaoke", "tribute", "commentary", "slowed_sped"}
 )
 _BAD_CONTEXT_SUPPORTED_FIELDS: frozenset[str] = frozenset(
     {"title", "album", "artist", "version", "subtitle", "display_title"}
 )
-# Pre-compiled pattern for bad-context marker scanning; sorted longest-first so
-# multi-word phrases (e.g. "made famous by") are tried before their substrings.
 _BAD_CONTEXT_PATTERN: re.Pattern[str] = re.compile(
     r"\b("
     + "|".join(
@@ -487,9 +446,6 @@ class CandidateExplanation:
     signals: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        # Wrap signals in a MappingProxyType to prevent callers from mutating
-        # the "immutable" explanation after construction.  A shallow copy is
-        # taken first so the caller's original dict is not aliased.
         object.__setattr__(
             self,
             "signals",
@@ -586,9 +542,10 @@ def _extract_variant_markers(text: str) -> frozenset[str]:
 
 
 def _parse_title(text: str) -> ParsedTitle:
-    norm = _normalise(text or "")
+    identity_text = _strip_inline_feature_credits(text or "")
+    norm = _normalise(identity_text)
     markers = _extract_variant_markers(text or "")
-    core = _normalise_variant_text(text or "")
+    core = _normalise_variant_text(identity_text)
     if not core:
         core = norm
     return ParsedTitle(
@@ -603,13 +560,7 @@ def _neutral_title_extension_match(
     row_title: ParsedTitle,
     candidate_title: ParsedTitle,
 ) -> bool:
-    """Return whether titles differ only by a plausible neutral subtitle.
-
-    The shorter title must appear as a contiguous token sequence in the longer
-    title, the extension must be bounded, and known recording/version markers
-    must agree.  Supporting artist/album/duration evidence is deliberately
-    checked by the scorer rather than here.
-    """
+    """Return whether titles differ only by a plausible neutral subtitle."""
     if not row_title.normalized or not candidate_title.normalized:
         return False
     if row_title.normalized == candidate_title.normalized:
@@ -627,9 +578,6 @@ def _neutral_title_extension_match(
     extra = len(long) - len(short)
     if not short or extra < 1 or extra > 5:
         return False
-    # Keep this permissive enough for catalogue prefixes such as
-    # "Magic Number" -> "(3 Is) The Magic Number".  The scorer still requires
-    # strong artist plus album/duration corroboration before accepting it.
     if len(short) / len(long) < 0.35:
         return False
 
@@ -642,12 +590,6 @@ def _resolve_bad_context_fields(
     config_fields: tuple[str, ...] | None,
     env_override: str = "",
 ) -> tuple[str, ...]:
-    """Resolve the effective set of bad-context fields to scan.
-
-    ``env_override`` must be passed explicitly (read by the caller from
-    ``STREAMRIP_BAD_CONTEXT_FIELDS``) so that it is part of the ``lru_cache``
-    key and stale results are never returned when the env changes.
-    """
     raw_fields: list[str]
     if env_override:
         raw_fields = [
@@ -677,9 +619,6 @@ def _contains_bad_context_fields(
     *,
     bad_context_fields: tuple[str, ...],
 ) -> bool:
-    # "version", "subtitle", and "display_title" are all facets of the
-    # track title field in different provider schemas; they share the same
-    # backing value so the deduplication loop below avoids scanning it twice.
     field_values: dict[str, str] = {
         "title": candidate_title,
         "album": candidate_album,
@@ -712,10 +651,8 @@ def _variant_mode(policy: MatchPolicy, marker: str) -> str:
         return policy.radio_edit_mode
     if marker == "remaster":
         return policy.remaster_mode
-    # Other material variants default to reject unless explicitly expected by source.
     if marker in {"remix", "demo", "orchestral", "session", "rehearsal"}:
         return "reject"
-    # explicit/clean/mono/stereo are near-equivalent.
     if marker in {"explicit", "clean", "mono", "stereo"}:
         return "equivalent"
     return "penalty"
@@ -741,7 +678,6 @@ def _variant_policy_penalty(
             penalty += 8
 
     for marker in missing_expected:
-        # Expected variant absent in candidate is a strong mismatch.
         mode = _variant_mode(policy, marker)
         if mode in {"reject", "penalty"}:
             penalty += 10
@@ -870,7 +806,9 @@ def _score_candidate_internal(
 
     if not row_title.normalized or not cand_title.normalized:
         return CandidateExplanation(
-            score=0, reason_codes=("reject_empty_title",), signals=signals
+            score=0,
+            reason_codes=("reject_empty_title",),
+            signals=signals,
         )
 
     exact_title = row_title.normalized == cand_title.normalized
@@ -891,7 +829,9 @@ def _score_candidate_internal(
     if not exact_title and not core_title_match and not neutral_extension:
         if allow_guarded_fuzzy and policy.enable_guarded_fuzzy_normal:
             fuzzy_ratio = SequenceMatcher(
-                None, row_title.normalized, cand_title.normalized
+                None,
+                row_title.normalized,
+                cand_title.normalized,
             ).ratio()
             signals["title_similarity"] = round(fuzzy_ratio, 4)
             guarded_fuzzy_match = (
@@ -900,7 +840,9 @@ def _score_candidate_internal(
             signals["title_fuzzy_guarded"] = guarded_fuzzy_match
         if not guarded_fuzzy_match:
             return CandidateExplanation(
-                score=0, reason_codes=("reject_title_mismatch",), signals=signals
+                score=0,
+                reason_codes=("reject_title_mismatch",),
+                signals=signals,
             )
 
     if (
@@ -912,11 +854,13 @@ def _score_candidate_internal(
             candidate_artist,
             bad_context_fields=policy.bad_context_fields,
         )
+        and not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS)
     ):
-        if not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS):
-            return CandidateExplanation(
-                score=0, reason_codes=("reject_bad_context",), signals=signals
-            )
+        return CandidateExplanation(
+            score=0,
+            reason_codes=("reject_bad_context",),
+            signals=signals,
+        )
 
     variant_penalty, reject_variant = _variant_policy_penalty(
         row_title.variants,
@@ -926,7 +870,9 @@ def _score_candidate_internal(
     signals["variant_penalty"] = variant_penalty
     if reject_variant and row_title.variants != cand_title.variants:
         return CandidateExplanation(
-            score=0, reason_codes=("reject_variant_policy",), signals=signals
+            score=0,
+            reason_codes=("reject_variant_policy",),
+            signals=signals,
         )
 
     score = 27
@@ -950,18 +896,14 @@ def _score_candidate_internal(
     elif artist_ok:
         score += 8
     else:
-        # Album/title/duration agreement is corroboration, never a substitute
-        # for artist identity in normal matching. This prevents common-title
-        # collisions and compilation metadata from promoting unrelated artists.
         return CandidateExplanation(
-            score=0, reason_codes=("reject_artist_mismatch",), signals=signals
+            score=0,
+            reason_codes=("reject_artist_mismatch",),
+            signals=signals,
         )
 
     if album_ok:
-        if row_album_norm == cand_album_norm:
-            score += 4
-        else:
-            score += 2
+        score += 4 if row_album_norm == cand_album_norm else 2
 
     _year_ignore_variants = ("remaster", "live", "remix")
     row_has_variant = any(v in row_title.variants for v in _year_ignore_variants)
@@ -987,7 +929,9 @@ def _score_candidate_internal(
             score += 2
         elif duration_delta >= 30000:
             return CandidateExplanation(
-                score=0, reason_codes=("reject_duration_far",), signals=signals
+                score=0,
+                reason_codes=("reject_duration_far",),
+                signals=signals,
             )
         elif duration_delta >= 20000:
             score -= 16
@@ -997,7 +941,9 @@ def _score_candidate_internal(
             score -= 4
 
     return CandidateExplanation(
-        score=max(score, 1), reason_codes=tuple(reasons), signals=signals
+        score=max(score, 1),
+        reason_codes=tuple(reasons),
+        signals=signals,
     )
 
 
@@ -1035,13 +981,12 @@ def explain_candidate_score_repair(
     candidate_duration_ms: int | None = None,
     policy: MatchPolicy | None = None,
 ) -> CandidateExplanation:
-    """Explain repair-mode matching with strict, corroborated fuzzy recovery.
+    """Explain repair scoring with strict promotion plus low-score fallback.
 
-    Unlike the legacy 20/28/35 tiers, strong repair candidates can clear the
-    normal acceptance threshold.  Fuzzy/alias recovery always requires artist
-    identity and, for weaker title relationships, album or duration evidence.
-    Material variant, bad-context and large duration conflicts remain hard
-    rejections.
+    The legacy 20/28/35 fuzzy tiers are retained below the strict acceptance
+    threshold for ``--accept-lowscore`` and diagnostics. A fuzzy candidate is
+    promoted above the normal 50-point threshold only when artist identity and
+    independent album/duration evidence corroborate the recording.
     """
     policy = policy or MatchPolicy()
     standard = _score_candidate_internal(
@@ -1069,20 +1014,20 @@ def explain_candidate_score_repair(
         "title_compact_exact": False,
     }
 
-    artist_inputs = row.artists_list or ([row.artists_raw] if row.artists_raw else [])
-    artist_ok = _artist_overlap(artist_inputs, candidate_artist)
-    coverage = _artist_coverage(artist_inputs, candidate_artist)
-    signals["artist_coverage"] = round(coverage, 3)
-    if not artist_ok:
+    norm_title = row_title.normalized
+    norm_candidate = cand_title.normalized
+    if not norm_title or not norm_candidate:
         return CandidateExplanation(
             score=0,
-            reason_codes=("reject_artist_mismatch",),
+            reason_codes=("reject_empty_title",),
             signals=signals,
         )
 
     if policy.enabled:
         variant_penalty, reject_variant = _variant_policy_penalty(
-            row_title.variants, cand_title.variants, policy
+            row_title.variants,
+            cand_title.variants,
+            policy,
         )
         signals["variant_penalty"] = variant_penalty
         if reject_variant and row_title.variants != cand_title.variants:
@@ -1091,27 +1036,23 @@ def explain_candidate_score_repair(
                 reason_codes=("reject_variant_policy",),
                 signals=signals,
             )
-        if policy.reject_bad_context_releases and _contains_bad_context_fields(
-            candidate_title,
-            candidate_album,
-            candidate_artist,
-            bad_context_fields=policy.bad_context_fields,
+        if (
+            policy.reject_bad_context_releases
+            and _contains_bad_context_fields(
+                candidate_title,
+                candidate_album,
+                candidate_artist,
+                bad_context_fields=policy.bad_context_fields,
+            )
+            and not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS)
         ):
-            if not row_title.variants.intersection(_BAD_CONTEXT_CARVEOUT_VARIANTS):
-                return CandidateExplanation(
-                    score=0,
-                    reason_codes=("reject_bad_context",),
-                    signals=signals,
-                )
+            return CandidateExplanation(
+                score=0,
+                reason_codes=("reject_bad_context",),
+                signals=signals,
+            )
     else:
         variant_penalty = 0
-
-    norm_title = row_title.normalized
-    norm_candidate = cand_title.normalized
-    if not norm_title or not norm_candidate:
-        return CandidateExplanation(
-            score=0, reason_codes=("reject_empty_title",), signals=signals
-        )
 
     ratio = SequenceMatcher(None, norm_title, norm_candidate).ratio()
     compact_exact = (
@@ -1123,9 +1064,23 @@ def explain_candidate_score_repair(
     signals["title_compact_exact"] = compact_exact
     signals["title_repair_containment"] = containment
 
+    if not (compact_exact or containment or ratio >= 0.80):
+        return CandidateExplanation(
+            score=0,
+            reason_codes=("reject_title_mismatch",),
+            signals=signals,
+        )
+
+    artist_inputs = row.artists_list or ([row.artists_raw] if row.artists_raw else [])
+    artist_ok = _artist_overlap(artist_inputs, candidate_artist)
+    coverage = _artist_coverage(artist_inputs, candidate_artist)
+    signals["artist_coverage"] = round(coverage, 3)
+
     row_album = _normalise_variant_text(row.album)
     candidate_album_norm = _normalise_variant_text(candidate_album)
-    album_exact = bool(row_album and candidate_album_norm and row_album == candidate_album_norm)
+    album_exact = bool(
+        row_album and candidate_album_norm and row_album == candidate_album_norm
+    )
     album_partial = bool(
         row_album
         and candidate_album_norm
@@ -1135,7 +1090,9 @@ def explain_candidate_score_repair(
         )
     )
     album_ok = album_exact or album_partial
-    signals["album_match"] = "exact" if album_exact else "partial" if album_partial else ""
+    signals["album_match"] = (
+        "exact" if album_exact else "partial" if album_partial else ""
+    )
 
     duration_delta = (
         abs(row.duration_ms - candidate_duration_ms)
@@ -1152,25 +1109,18 @@ def explain_candidate_score_repair(
             )
     duration_ok = bool(duration_delta is not None and duration_delta <= 12000)
 
-    if not (compact_exact or containment or ratio >= 0.80):
-        return CandidateExplanation(
-            score=0,
-            reason_codes=("reject_title_mismatch",),
-            signals=signals,
-        )
+    legacy_score = 35 if artist_ok else 28 if album_partial else 20
+    if row.release_date and candidate_date:
+        if row.release_date[:4] == str(candidate_date)[:4]:
+            legacy_score += 5
 
-    # A weak fuzzy title needs independent recording context.  This keeps the
-    # repair pass from turning common-title searches into false positives.
-    if ratio < 0.90 and not compact_exact and not (album_ok or duration_ok):
+    # Keep weak fuzzy candidates available to the separately guarded
+    # --accept-lowscore path. They must not pass the strict threshold here.
+    if not artist_ok or not (album_ok or duration_ok):
+        signals["title_repair_fuzzy"] = True
         return CandidateExplanation(
-            score=0,
-            reason_codes=("reject_repair_fuzzy_without_context",),
-            signals=signals,
-        )
-    if containment and not compact_exact and not (album_ok or duration_ok):
-        return CandidateExplanation(
-            score=0,
-            reason_codes=("reject_repair_containment_without_context",),
+            score=max(1, legacy_score - variant_penalty),
+            reason_codes=("repair_low_confidence_fuzzy",),
             signals=signals,
         )
 
@@ -1242,7 +1192,7 @@ def score_candidate_repair(
     candidate_duration_ms: int | None = None,
     policy: MatchPolicy | None = None,
 ) -> int:
-    """Score a candidate using the strict repair-mode recovery model."""
+    """Score a candidate using repair-mode strict/low-score semantics."""
     return explain_candidate_score_repair(
         row,
         candidate_title,
@@ -1293,7 +1243,6 @@ def _warn_incomplete_override(
     src: str,
     cand_id: str,
 ) -> None:
-    """Log a warning when only one half of a primary or fallback override pair is set."""
     logger.warning(
         "Row %d (%r): incomplete %s override "
         "(override_%s_source=%r, override_%s_candidate_id=%r); "
@@ -1310,13 +1259,7 @@ def _warn_incomplete_override(
 
 
 def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
-    """Parse an ``*_unresolved.csv`` log file back into :class:`ExportifyCsvRow` objects.
-
-    The unresolved log (written by :class:`~streamrip.db.UnresolvedQueryLog`)
-    stores all fields needed to replay the query.
-
-    Unknown columns are ignored; missing optional fields default to empty string.
-    """
+    """Parse an ``*_unresolved.csv`` log back into Exportify rows."""
     rows: list[ExportifyCsvRow] = []
     with open(path, encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -1389,9 +1332,10 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
                     repair_candidate_ids = {}
                 repair_candidate_ids[fallback_source] = fallback_candidate_id
 
+            track_name = (row.get("track_name") or "").strip()
             rows.append(
                 ExportifyCsvRow(
-                    track_name=(row.get("track_name") or "").strip(),
+                    track_name=track_name,
                     artists_raw=artists_raw,
                     artists_list=artists_list,
                     album=(row.get("album") or "").strip(),
@@ -1404,8 +1348,8 @@ def parse_unresolved_csv(path: str) -> list[ExportifyCsvRow]:
                     position=position,
                     row_index=source_row_index,
                     source_row_index=source_row_index,
-                    canonical_track_name=strip_title_decorators(
-                        (row.get("track_name") or "").strip()
+                    canonical_track_name=_strip_inline_feature_credits(
+                        strip_title_decorators(track_name)
                     ),
                     duration_ms=duration_ms,
                     repair_candidate_ids=repair_candidate_ids,
@@ -1421,12 +1365,7 @@ def _duration_match_with_tolerance(
     tolerance_ratio: float,
     tolerance_seconds: float,
 ) -> bool:
-    """CSV duration sanity check with hybrid tolerance and anti-preview guard.
-
-    Returns False when ``actual_seconds`` is unavailable (None or <= 0) and
-    ``expected_ms`` is positive.  Callers that want best-effort / permissive
-    behaviour for unreadable files must guard before calling this function.
-    """
+    """CSV duration sanity check with hybrid tolerance and anti-preview guard."""
     if expected_ms is None or expected_ms <= 0:
         return True
     if actual_seconds is None or actual_seconds <= 0:
@@ -1435,6 +1374,7 @@ def _duration_match_with_tolerance(
     if actual_seconds < 45.0 and expected_seconds >= 90.0:
         return False
     allowed_delta = max(
-        float(tolerance_seconds), expected_seconds * float(tolerance_ratio)
+        float(tolerance_seconds),
+        expected_seconds * float(tolerance_ratio),
     )
     return abs(actual_seconds - expected_seconds) <= allowed_delta
