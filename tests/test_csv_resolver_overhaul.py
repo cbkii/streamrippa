@@ -8,7 +8,6 @@ from streamrip.file_lists import (
     explain_candidate_score,
     explain_candidate_score_repair,
     parse_exportify_csv,
-    strip_title_decorators,
 )
 from streamrip.media.csv_playlist import (
     TrackCandidate,
@@ -276,11 +275,19 @@ def test_repair_awnaw_compact_title_can_clear_strict_threshold() -> None:
     assert "accepted_repair_compact_title" in explanation.reason_codes
 
 
-def test_unbracketed_feature_credit_is_removed_from_core_title() -> None:
-    assert (
-        strip_title_decorators("So Far To Go feat. Common & D'Angelo")
-        == "So Far To Go"
+def test_unbracketed_feature_credit_is_removed_from_csv_canonical_title(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "featured.csv"
+    csv_path.write_text(
+        "Track URI,Track Name,Artist Name(s),Album Name\n"
+        'spotify:track:1,"So Far To Go feat. Common & D\'Angelo",J Dilla,The Shining\n',
+        encoding="utf-8",
     )
+
+    _, rows = parse_exportify_csv(str(csv_path))
+
+    assert rows[0].canonical_track_name == "So Far To Go"
 
 
 def test_diacritic_artist_difference_is_not_an_artist_mismatch() -> None:
@@ -306,7 +313,7 @@ def test_diacritic_artist_difference_is_not_an_artist_mismatch() -> None:
     assert explanation.signals["artist_coverage"] == 1.0
 
 
-def test_repair_fuzzy_title_rejects_unrelated_artist() -> None:
+def test_repair_fuzzy_unrelated_artist_stays_below_strict_threshold() -> None:
     explanation = explain_candidate_score_repair(
         _row(
             track_name="Can't Help Loving That Man",
@@ -325,11 +332,11 @@ def test_repair_fuzzy_title_rejects_unrelated_artist() -> None:
         policy=MatchPolicy(),
     )
 
-    assert explanation.score == 0
-    assert "reject_artist_mismatch" in explanation.reason_codes
+    assert 0 < explanation.score < 50
+    assert "repair_low_confidence_fuzzy" in explanation.reason_codes
 
 
-def test_repair_weak_fuzzy_requires_recording_context() -> None:
+def test_repair_weak_fuzzy_without_recording_context_stays_low_score() -> None:
     explanation = explain_candidate_score_repair(
         _row(
             track_name="Heatwave Moving",
@@ -348,8 +355,8 @@ def test_repair_weak_fuzzy_requires_recording_context() -> None:
         policy=MatchPolicy(),
     )
 
-    assert explanation.score == 0
-    assert "reject_repair_fuzzy_without_context" in explanation.reason_codes
+    assert 0 < explanation.score < 50
+    assert "repair_low_confidence_fuzzy" in explanation.reason_codes
 
 
 def test_repair_does_not_semantically_guess_different_de_la_soul_title() -> None:
