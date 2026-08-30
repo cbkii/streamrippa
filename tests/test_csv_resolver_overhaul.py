@@ -6,7 +6,9 @@ from streamrip.file_lists import (
     ExportifyCsvRow,
     MatchPolicy,
     explain_candidate_score,
+    explain_candidate_score_repair,
     parse_exportify_csv,
+    strip_title_decorators,
 )
 from streamrip.media.csv_playlist import (
     TrackCandidate,
@@ -103,7 +105,10 @@ def test_incompatible_live_variant_is_not_neutral_extension() -> None:
     )
 
     assert explanation.score == 0
-    assert "reject_variant_policy" in explanation.reason_codes or "reject_title_mismatch" in explanation.reason_codes
+    assert (
+        "reject_variant_policy" in explanation.reason_codes
+        or "reject_title_mismatch" in explanation.reason_codes
+    )
 
 
 def test_exact_isrc_allows_reissue_album_difference() -> None:
@@ -207,3 +212,163 @@ def test_exportify_parser_accepts_common_column_aliases(tmp_path: Path) -> None:
     assert row.duration_ms == 239000
     assert row.genres == "Hip Hop, Soul"
     assert row.isrc == "FRABC0512345"
+
+
+def test_exportify_parser_recognises_comma_separated_artist_credits(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "artists.csv"
+    csv_path.write_text(
+        "Track URI,Track Name,Artist Name(s),Album Name\n"
+        'spotify:track:1,Good Day,"Greg Street, Nappy Roots",Good Day\n',
+        encoding="utf-8",
+    )
+
+    _, rows = parse_exportify_csv(str(csv_path))
+
+    assert rows[0].artists_raw == "Greg Street, Nappy Roots"
+    assert rows[0].artists_list == ["Greg Street", "Nappy Roots"]
+
+
+def test_repair_magic_number_catalogue_prefix_can_clear_strict_threshold() -> None:
+    explanation = explain_candidate_score_repair(
+        _row(
+            track_name="Magic Number",
+            canonical_track_name="Magic Number",
+            artists_raw="De La Soul",
+            artists_list=["De La Soul"],
+            album="3 Feet High and Rising",
+            duration_ms=207000,
+        ),
+        "(3 Is) The Magic Number",
+        "De La Soul",
+        "3 Feet High and Rising",
+        "1989-03-03",
+        "",
+        207500,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score >= 50
+    assert explanation.signals["title_neutral_extension"] is True
+
+
+def test_repair_awnaw_compact_title_can_clear_strict_threshold() -> None:
+    explanation = explain_candidate_score_repair(
+        _row(
+            track_name="Aw Naw",
+            canonical_track_name="Aw Naw",
+            artists_raw="Nappy Roots",
+            artists_list=["Nappy Roots"],
+            album="Watermelon, Chicken & Gritz",
+            duration_ms=239000,
+        ),
+        "Awnaw",
+        "Nappy Roots",
+        "Watermelon, Chicken & Gritz",
+        "2002-02-26",
+        "",
+        239700,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score >= 50
+    assert "accepted_repair_compact_title" in explanation.reason_codes
+
+
+def test_unbracketed_feature_credit_is_removed_from_core_title() -> None:
+    assert (
+        strip_title_decorators("So Far To Go feat. Common & D'Angelo")
+        == "So Far To Go"
+    )
+
+
+def test_diacritic_artist_difference_is_not_an_artist_mismatch() -> None:
+    explanation = explain_candidate_score(
+        _row(
+            track_name="Take It Easy My Brother Charles",
+            canonical_track_name="Take It Easy My Brother Charles",
+            artists_raw="Som Tres",
+            artists_list=["Som Tres"],
+            album="Som 3",
+            duration_ms=183000,
+        ),
+        "Take It Easy My Brother Charles",
+        "Som Três",
+        "Som 3",
+        "1970-01-01",
+        "",
+        183500,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score >= 50
+    assert explanation.signals["artist_coverage"] == 1.0
+
+
+def test_repair_fuzzy_title_rejects_unrelated_artist() -> None:
+    explanation = explain_candidate_score_repair(
+        _row(
+            track_name="Can't Help Loving That Man",
+            canonical_track_name="Can't Help Loving That Man",
+            artists_raw="Trudy Richards",
+            artists_list=["Trudy Richards"],
+            album="The Many Moods of Trudy Richards",
+            duration_ms=180000,
+        ),
+        "Can't Help Lovin' That Man",
+        "Different Singer",
+        "The Many Moods of Trudy Richards",
+        "1957-01-01",
+        "",
+        180500,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score == 0
+    assert "reject_artist_mismatch" in explanation.reason_codes
+
+
+def test_repair_weak_fuzzy_requires_recording_context() -> None:
+    explanation = explain_candidate_score_repair(
+        _row(
+            track_name="Heatwave Moving",
+            canonical_track_name="Heatwave Moving",
+            artists_raw="Tommy McCook",
+            artists_list=["Tommy McCook"],
+            album="",
+            duration_ms=None,
+        ),
+        "Heatwave aka Moving",
+        "Tommy McCook",
+        "",
+        "",
+        "",
+        None,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score == 0
+    assert "reject_repair_fuzzy_without_context" in explanation.reason_codes
+
+
+def test_repair_does_not_semantically_guess_different_de_la_soul_title() -> None:
+    explanation = explain_candidate_score_repair(
+        _row(
+            track_name="It Aint All Good",
+            canonical_track_name="It Aint All Good",
+            artists_raw="De La Soul",
+            artists_list=["De La Soul"],
+            album="",
+            duration_ms=None,
+        ),
+        "All Good?",
+        "De La Soul",
+        "Art Official Intelligence: Mosaic Thump",
+        "2000-08-08",
+        "",
+        240000,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score == 0
