@@ -208,9 +208,7 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
             duration_ms: int | None = None
             try:
                 duration_raw = (
-                    row.get("Duration (ms)")
-                    or row.get("Track Duration (ms)")
-                    or ""
+                    row.get("Duration (ms)") or row.get("Track Duration (ms)") or ""
                 ).strip()
                 if duration_raw:
                     parsed_duration = int(duration_raw)
@@ -219,7 +217,9 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
             except (ValueError, TypeError):
                 duration_ms = None
             track_name = (row.get("Track Name") or "").strip()
-            canonical = _strip_inline_feature_credits(strip_title_decorators(track_name))
+            canonical = _strip_inline_feature_credits(
+                strip_title_decorators(track_name)
+            )
 
             rows.append(
                 ExportifyCsvRow(
@@ -228,13 +228,13 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
                     artists_list=artists_list,
                     album=(row.get("Album Name") or "").strip(),
                     release_date=(
-                        row.get("Release Date")
-                        or row.get("Album Release Date")
-                        or ""
+                        row.get("Release Date") or row.get("Album Release Date") or ""
                     ).strip(),
                     isrc=isrc,
                     spotify_uri=(row.get("Track URI") or "").strip(),
-                    genres=(row.get("Genres") or row.get("Artist Genres") or "").strip(),
+                    genres=(
+                        row.get("Genres") or row.get("Artist Genres") or ""
+                    ).strip(),
                     loudness=(row.get("Loudness") or "").strip(),
                     tempo=(row.get("Tempo") or "").strip(),
                     position=position,
@@ -818,7 +818,9 @@ def _score_candidate_internal(
         and row_title.core_title == cand_title.core_title
     )
     neutral_extension = _neutral_title_extension_match(row_title, cand_title)
-    neutral_extension = bool(neutral_extension and artist_ok and (album_ok or duration_ok))
+    neutral_extension = bool(
+        neutral_extension and artist_ok and (album_ok or duration_ok)
+    )
 
     signals["title_exact"] = exact_title
     signals["title_core"] = core_title_match
@@ -1055,10 +1057,9 @@ def explain_candidate_score_repair(
         variant_penalty = 0
 
     ratio = SequenceMatcher(None, norm_title, norm_candidate).ratio()
-    compact_exact = (
-        bool(_compact_identity_text(norm_title))
-        and _compact_identity_text(norm_title) == _compact_identity_text(norm_candidate)
-    )
+    compact_exact = bool(_compact_identity_text(norm_title)) and _compact_identity_text(
+        norm_title
+    ) == _compact_identity_text(norm_candidate)
     containment = _neutral_title_extension_match(row_title, cand_title)
     signals["title_similarity"] = round(ratio, 4)
     signals["title_compact_exact"] = compact_exact
@@ -1084,10 +1085,7 @@ def explain_candidate_score_repair(
     album_partial = bool(
         row_album
         and candidate_album_norm
-        and (
-            row_album in candidate_album_norm
-            or candidate_album_norm in row_album
-        )
+        and (row_album in candidate_album_norm or candidate_album_norm in row_album)
     )
     album_ok = album_exact or album_partial
     signals["album_match"] = (

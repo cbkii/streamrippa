@@ -471,8 +471,6 @@ def _rejection_reason(candidate: TrackCandidate | None) -> str:
     return "candidates-found-but-rejected"
 
 
-
-
 def _pick_best_candidate(
     row: ExportifyCsvRow,
     source: str,
@@ -1964,7 +1962,10 @@ class PendingCsvPlaylist(Pending):
                 query: str, strategy: str, candidate: TrackCandidate
             ) -> None:
                 for index, (_, _, existing) in enumerate(matched_hits):
-                    if existing.id == candidate.id and existing.source == candidate.source:
+                    if (
+                        existing.id == candidate.id
+                        and existing.source == candidate.source
+                    ):
                         if candidate.score > existing.score:
                             matched_hits[index] = (query, strategy, candidate)
                         return
@@ -2092,10 +2093,11 @@ class PendingCsvPlaylist(Pending):
                     provisional = _select_best_candidate(matched_hits)
                     if provisional is not None:
                         _refresh_candidate_confidence(provisional[2])
-                        if (
-                            provisional[2].score >= provider_min_score + 10
-                            and provisional[2].confidence in {CONF_MEDIUM, CONF_HIGH}
-                        ):
+                        if provisional[
+                            2
+                        ].score >= provider_min_score + 10 and provisional[
+                            2
+                        ].confidence in {CONF_MEDIUM, CONF_HIGH}:
                             break
 
                 last_query = query
@@ -2274,8 +2276,14 @@ class PendingCsvPlaylist(Pending):
             )
             return ResolverOutcome(
                 candidate=None,
-                reason=(REASON_NO_RESULTS_AFTER_BROAD if attempted_broad else REASON_NO_RESULTS),
-                query=" || ".join(str(a.get("query", "")) for a in attempts if a.get("query")),
+                reason=(
+                    REASON_NO_RESULTS_AFTER_BROAD
+                    if attempted_broad
+                    else REASON_NO_RESULTS
+                ),
+                query=" || ".join(
+                    str(a.get("query", "")) for a in attempts if a.get("query")
+                ),
                 strategy=" / ".join(
                     str(a.get("strategy", "")) for a in attempts if a.get("strategy")
                 ),
@@ -2288,7 +2296,11 @@ class PendingCsvPlaylist(Pending):
         )
 
         def _eligible_for_escalation(outcome: ResolverOutcome) -> bool:
-            return outcome.reason == REASON_NO_RESULTS or outcome.reason == REASON_NO_RESULTS_AFTER_BROAD or outcome.reason.startswith(REASON_LOW_CONFIDENCE)
+            return (
+                outcome.reason == REASON_NO_RESULTS
+                or outcome.reason == REASON_NO_RESULTS_AFTER_BROAD
+                or outcome.reason.startswith(REASON_LOW_CONFIDENCE)
+            )
 
         # Search fallback service if configured and primary did not strictly match.
         if self.fallback_client is not None and primary_outcome.reason != "matched":

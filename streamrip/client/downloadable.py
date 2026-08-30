@@ -56,9 +56,10 @@ def _is_excessive_headers_error(exc: BaseException) -> bool:
             continue
         seen.add(marker)
 
-        if isinstance(current, HTTPException) and "more than 100 headers" in str(
-            current
-        ).casefold():
+        if (
+            isinstance(current, HTTPException)
+            and "more than 100 headers" in str(current).casefold()
+        ):
             return True
 
         if current.__cause__ is not None:
