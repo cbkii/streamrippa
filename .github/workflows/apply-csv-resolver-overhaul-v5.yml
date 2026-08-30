@@ -94,7 +94,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm \
+          git rm -f \
             .github/workflows/apply-csv-resolver-overhaul.yml \
             .github/workflows/apply-csv-resolver-overhaul-v2.yml \
             .github/workflows/apply-csv-resolver-overhaul-v3.yml \
