@@ -44,7 +44,9 @@ async def test_basic_downloadable_falls_back_to_aiohttp_for_excessive_headers(
         "flac",
         source="qobuz",
     )
-    callback = lambda _size: None
+
+    def callback(_size: int) -> None:
+        return None
 
     await downloadable._download("/tmp/test.flac", callback)
 
