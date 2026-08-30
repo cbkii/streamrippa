@@ -1109,6 +1109,17 @@ def explain_candidate_score_repair(
             )
     duration_ok = bool(duration_delta is not None and duration_delta <= 12000)
 
+    # Containment by itself is too weak for semantic phrases such as
+    # "It Aint All Good" -> "All Good?". Require either normal fuzzy-title
+    # similarity or independent recording context before the aggressive
+    # low-score lane may consider it.
+    if containment and ratio < 0.80 and not (album_ok or duration_ok):
+        return CandidateExplanation(
+            score=0,
+            reason_codes=("reject_semantic_title_containment",),
+            signals=signals,
+        )
+
     legacy_score = 35 if artist_ok else 28 if album_partial else 20
     if row.release_date and candidate_date:
         if row.release_date[:4] == str(candidate_date)[:4]:
