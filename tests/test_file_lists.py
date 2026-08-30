@@ -318,10 +318,15 @@ def _make_row(
     )
 
 
-def test_score_exact_isrc_wins():
+def test_score_exact_isrc_wins_when_identity_context_is_safe():
     row = _make_row(isrc="USBN41601500")
     score = score_candidate(
-        row, "Completely Different Title", "Wrong Artist", "", "", "USBN41601500"
+        row,
+        "Blue in Green",
+        "Miles Davis",
+        "Later Compilation",
+        "2018",
+        "USBN41601500",
     )
     assert score == 100
 
@@ -334,12 +339,12 @@ def test_score_exact_title_artist():
     assert score >= 60
 
 
-def test_score_title_album_bonus():
+def test_score_title_album_does_not_override_artist_mismatch():
     row = _make_row()
     score = score_candidate(
         row, "Blue in Green", "Unknown Artist", "Kind of Blue", "1959", ""
     )
-    assert 40 <= score < 70
+    assert score == 0
 
 
 def test_score_year_bonus():
@@ -520,12 +525,17 @@ def test_repair_score_exact_delegates_to_standard():
     assert repair >= 60
 
 
-def test_repair_score_isrc_short_circuits():
+def test_repair_score_isrc_short_circuits_when_identity_context_is_safe():
     from streamrip.file_lists import score_candidate_repair
 
     row = _make_row(isrc="USJAZ1234567")
     score = score_candidate_repair(
-        row, "Totally Different Title", "Unknown Artist", "", "", "USJAZ1234567"
+        row,
+        "Blue in Green",
+        "Miles Davis",
+        "Later Compilation",
+        "2018",
+        "USJAZ1234567",
     )
     assert score == 100
 

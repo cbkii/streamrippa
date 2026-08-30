@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import warnings
 from collections import defaultdict
 from collections.abc import Mapping
@@ -177,7 +178,11 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
             isrc = (row.get("ISRC") or row.get("Track ISRC") or "").strip()
             duration_ms: int | None = None
             try:
-                duration_raw = (row.get("Duration (ms)") or "").strip()
+                duration_raw = (
+                    row.get("Duration (ms)")
+                    or row.get("Track Duration (ms)")
+                    or ""
+                ).strip()
                 if duration_raw:
                     parsed_duration = int(duration_raw)
                     if parsed_duration > 0:
@@ -192,10 +197,14 @@ def parse_exportify_csv(path: str) -> tuple[str, list[ExportifyCsvRow]]:
                     artists_raw=artists_raw,
                     artists_list=artists_list,
                     album=(row.get("Album Name") or "").strip(),
-                    release_date=(row.get("Release Date") or "").strip(),
+                    release_date=(
+                        row.get("Release Date")
+                        or row.get("Album Release Date")
+                        or ""
+                    ).strip(),
                     isrc=isrc,
                     spotify_uri=(row.get("Track URI") or "").strip(),
-                    genres=(row.get("Genres") or "").strip(),
+                    genres=(row.get("Genres") or row.get("Artist Genres") or "").strip(),
                     loudness=(row.get("Loudness") or "").strip(),
                     tempo=(row.get("Tempo") or "").strip(),
                     position=position,
@@ -276,17 +285,35 @@ def detect_file_mode(content: str) -> FileMode:
 
 
 def _normalise(s: str) -> str:
-    """Lightweight text normalisation used for candidate scoring.
+    """Conservatively normalise catalogue identity text.
 
-    - lowercase
-    - strip leading/trailing whitespace
-    - collapse runs of whitespace/hyphens/underscores to a single space
-    - remove most punctuation (keep word chars and spaces)
+    Formatting differences are folded while meaningful words remain available
+    to the title/variant model.  Latin diacritics are folded so provider
+    transliteration differences do not prevent an otherwise strong match.
     """
-    s = s.lower().strip()
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.casefold().strip()
+    s = s.translate(
+        str.maketrans(
+            {
+                "\u2019": "'",
+                "\u2018": "'",
+                "`": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+                "\u2013": "-",
+                "\u2014": "-",
+                "\u2212": "-",
+            }
+        )
+    )
+    s = s.replace("&", " and ")
     s = re.sub(r"[\s\-_]+", " ", s)
     s = re.sub(r"[^\w\s]", "", s)
-    return s
+    return re.sub(r"\s+", " ", s).strip()
+
+
 
 
 def strip_title_decorators(title: str) -> str:
@@ -310,13 +337,13 @@ def strip_title_decorators(title: str) -> str:
 
     # Drop trailing "- Remaster/Live/Edit/Version/Mono/Stereo/Deluxe..." suffixes.
     stripped = re.sub(
-        r"\s*[-\u2013—:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
+        r"\s*[-\u2013\u2014:]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|live|edit|version|mono|stereo|deluxe|explicit|clean)\b.*$",
         "",
         stripped,
         flags=re.IGNORECASE,
     )
     stripped = re.sub(
-        r"\s*[-\u2013—:]\s*(?:acoustic|live|session|mix|version|edit|remaster(?:ed)?|unplugged)\b.*$",
+        r"\s*[-\u2013\u2014:]\s*(?:acoustic|live|session|mix|version|edit|remaster(?:ed)?|unplugged)\b.*$",
         "",
         stripped,
         flags=re.IGNORECASE,
@@ -528,6 +555,41 @@ def _parse_title(text: str) -> ParsedTitle:
     )
 
 
+def _neutral_title_extension_match(
+    row_title: ParsedTitle,
+    candidate_title: ParsedTitle,
+) -> bool:
+    """Return whether titles differ only by a plausible neutral subtitle.
+
+    The shorter title must appear as a contiguous token sequence in the longer
+    title, the extension must be bounded, and known recording/version markers
+    must agree.  Supporting artist/album/duration evidence is deliberately
+    checked by the scorer rather than here.
+    """
+    if not row_title.normalized or not candidate_title.normalized:
+        return False
+    if row_title.normalized == candidate_title.normalized:
+        return False
+    if row_title.variants != candidate_title.variants:
+        return False
+
+    row_tokens = row_title.normalized.split()
+    candidate_tokens = candidate_title.normalized.split()
+    if len(row_tokens) <= len(candidate_tokens):
+        short, long = row_tokens, candidate_tokens
+    else:
+        short, long = candidate_tokens, row_tokens
+
+    extra = len(long) - len(short)
+    if not short or extra < 1 or extra > 5:
+        return False
+    if len(short) / len(long) < 0.45:
+        return False
+
+    width = len(short)
+    return any(long[i : i + width] == short for i in range(len(long) - width + 1))
+
+
 @functools.lru_cache(maxsize=64)
 def _resolve_bad_context_fields(
     config_fields: tuple[str, ...] | None,
@@ -668,18 +730,74 @@ def _score_candidate_internal(
     reasons: list[str] = []
     row_title = _parse_title(row.track_name)
     cand_title = _parse_title(candidate_title)
+    isrc_match = bool(
+        row.isrc and candidate_isrc and row.isrc.upper() == candidate_isrc.upper()
+    )
     signals: dict[str, object] = {
-        "isrc_match": bool(
-            row.isrc and candidate_isrc and row.isrc.upper() == candidate_isrc.upper()
-        ),
+        "isrc_match": isrc_match,
+        "isrc_safety_veto": "",
         "row_variants": sorted(row_title.variants),
         "candidate_variants": sorted(cand_title.variants),
         "title_exact": False,
         "title_core": False,
+        "title_neutral_extension": False,
+        "title_token_containment": False,
         "title_fuzzy_guarded": False,
     }
 
-    if row.isrc and candidate_isrc and row.isrc.upper() == candidate_isrc.upper():
+    artist_inputs = row.artists_list or ([row.artists_raw] if row.artists_raw else [])
+    artist_ok = _artist_overlap(artist_inputs, candidate_artist)
+    row_album_norm = _normalise_variant_text(row.album)
+    cand_album_norm = _normalise_variant_text(candidate_album)
+    album_ok = bool(
+        row.album
+        and candidate_album
+        and row_album_norm
+        and cand_album_norm
+        and (
+            row_album_norm == cand_album_norm
+            or row_album_norm in cand_album_norm
+            or cand_album_norm in row_album_norm
+        )
+    )
+    duration_delta = (
+        abs(row.duration_ms - candidate_duration_ms)
+        if row.duration_ms and candidate_duration_ms
+        else None
+    )
+    duration_ok = bool(duration_delta is not None and duration_delta <= 12000)
+
+    if isrc_match:
+        if not artist_ok:
+            signals["isrc_safety_veto"] = "artist-conflict"
+            return CandidateExplanation(
+                score=0,
+                reason_codes=("reject_isrc_artist_conflict",),
+                signals=signals,
+            )
+        variant_penalty, reject_variant = _variant_policy_penalty(
+            row_title.variants,
+            cand_title.variants,
+            policy,
+        )
+        signals["variant_penalty"] = variant_penalty
+        if reject_variant and row_title.variants != cand_title.variants:
+            signals["isrc_safety_veto"] = "variant-conflict"
+            return CandidateExplanation(
+                score=0,
+                reason_codes=("reject_isrc_variant_conflict",),
+                signals=signals,
+            )
+        if duration_delta is not None:
+            severe_delta = max(30000, int((row.duration_ms or 0) * 0.10))
+            signals["duration_delta_ms"] = duration_delta
+            if duration_delta >= severe_delta:
+                signals["isrc_safety_veto"] = "duration-conflict"
+                return CandidateExplanation(
+                    score=0,
+                    reason_codes=("reject_isrc_duration_conflict",),
+                    signals=signals,
+                )
         has_bad_context = (
             policy.enabled
             and policy.reject_bad_context_releases
@@ -693,6 +811,7 @@ def _score_candidate_internal(
         if has_bad_context and not row_title.variants.intersection(
             _BAD_CONTEXT_CARVEOUT_VARIANTS
         ):
+            signals["isrc_safety_veto"] = "bad-context"
             return CandidateExplanation(
                 score=0,
                 reason_codes=("reject_bad_context",),
@@ -715,33 +834,21 @@ def _score_candidate_internal(
         and bool(cand_title.core_title)
         and row_title.core_title == cand_title.core_title
     )
+    neutral_extension = _neutral_title_extension_match(row_title, cand_title)
+    neutral_extension = bool(neutral_extension and artist_ok and (album_ok or duration_ok))
+
     signals["title_exact"] = exact_title
     signals["title_core"] = core_title_match
+    signals["title_neutral_extension"] = neutral_extension
+    signals["title_token_containment"] = neutral_extension
+
     guarded_fuzzy_match = False
-    if not exact_title and not core_title_match:
+    if not exact_title and not core_title_match and not neutral_extension:
         if allow_guarded_fuzzy and policy.enable_guarded_fuzzy_normal:
             fuzzy_ratio = SequenceMatcher(
                 None, row_title.normalized, cand_title.normalized
             ).ratio()
             signals["title_similarity"] = round(fuzzy_ratio, 4)
-            artist_ok = _artist_overlap(row.artists_list, candidate_artist)
-            row_album_norm = _normalise_variant_text(row.album)
-            cand_album_norm = _normalise_variant_text(candidate_album)
-            album_ok = bool(
-                row.album
-                and candidate_album
-                and row_album_norm
-                and cand_album_norm
-                and (
-                    row_album_norm in cand_album_norm
-                    or cand_album_norm in row_album_norm
-                )
-            )
-            duration_ok = bool(
-                row.duration_ms
-                and candidate_duration_ms
-                and abs(row.duration_ms - candidate_duration_ms) <= 8000
-            )
             guarded_fuzzy_match = (
                 fuzzy_ratio >= 0.90 and artist_ok and (album_ok or duration_ok)
             )
@@ -766,18 +873,27 @@ def _score_candidate_internal(
                 score=0, reason_codes=("reject_bad_context",), signals=signals
             )
 
+    variant_penalty, reject_variant = _variant_policy_penalty(
+        row_title.variants,
+        cand_title.variants,
+        policy,
+    )
+    signals["variant_penalty"] = variant_penalty
+    if reject_variant and row_title.variants != cand_title.variants:
+        return CandidateExplanation(
+            score=0, reason_codes=("reject_variant_policy",), signals=signals
+        )
+
     score = 27
     if exact_title:
         score += 10
     if core_title_match:
         score += 8
+    if neutral_extension:
+        score += 7
+        reasons.append("accepted_neutral_title_extension")
     if guarded_fuzzy_match:
         score += 6
-        # NOTE: `reasons` accumulates only on the accept path.  Rejection
-        # branches (e.g. reject_artist_mismatch, reject_duration_far) return
-        # their own single-element reason_codes, so signals such as
-        # "title_fuzzy_guarded" may be True in telemetry without a corresponding
-        # accept reason code.
         reasons.append("accepted_guarded_fuzzy")
 
     coverage = _artist_coverage(row.artists_list, candidate_artist)
@@ -786,37 +902,21 @@ def _score_candidate_internal(
         score += 26
     elif coverage >= 0.5:
         score += 14
-    elif _artist_overlap(row.artists_list, candidate_artist):
+    elif artist_ok:
         score += 8
     else:
-        weak_context = False
-        if row.album and candidate_album and (core_title_match or guarded_fuzzy_match):
-            row_album_norm = _normalise_variant_text(row.album)
-            cand_album_norm = _normalise_variant_text(candidate_album)
-            weak_context = bool(
-                row_album_norm
-                and cand_album_norm
-                and (
-                    row_album_norm == cand_album_norm
-                    or row_album_norm in cand_album_norm
-                    or cand_album_norm in row_album_norm
-                )
-            )
-        if not weak_context:
-            return CandidateExplanation(
-                score=0, reason_codes=("reject_artist_mismatch",), signals=signals
-            )
-        score -= 10
-        reasons.append("penalty_weak_artist_context")
+        # Album/title/duration agreement is corroboration, never a substitute
+        # for artist identity in normal matching. This prevents common-title
+        # collisions and compilation metadata from promoting unrelated artists.
+        return CandidateExplanation(
+            score=0, reason_codes=("reject_artist_mismatch",), signals=signals
+        )
 
-    if row.album and candidate_album:
-        row_album = _normalise_variant_text(row.album)
-        cand_album = _normalise_variant_text(candidate_album)
-        if row_album and cand_album:
-            if row_album == cand_album:
-                score += 4
-            elif row_album in cand_album or cand_album in row_album:
-                score += 2
+    if album_ok:
+        if row_album_norm == cand_album_norm:
+            score += 4
+        else:
+            score += 2
 
     _year_ignore_variants = ("remaster", "live", "remix")
     row_has_variant = any(v in row_title.variants for v in _year_ignore_variants)
@@ -828,40 +928,34 @@ def _score_candidate_internal(
     ):
         score += _year_bonus(row.release_date, candidate_date)
 
-    variant_penalty, reject_variant = _variant_policy_penalty(
-        row_title.variants,
-        cand_title.variants,
-        policy,
-    )
-    signals["variant_penalty"] = variant_penalty
-    if reject_variant and row_title.variants != cand_title.variants:
-        return CandidateExplanation(
-            score=0, reason_codes=("reject_variant_policy",), signals=signals
-        )
     if row_title.variants and row_title.variants.issubset(cand_title.variants):
         score += 8
     score -= variant_penalty
 
-    if row.duration_ms and candidate_duration_ms:
-        delta = abs(row.duration_ms - candidate_duration_ms)
-        signals["duration_delta_ms"] = delta
-        if delta <= 2500:
+    if duration_delta is not None:
+        signals["duration_delta_ms"] = duration_delta
+        if duration_delta <= 2500:
             score += 10
-        elif delta <= 6000:
-            score += 4
-        elif delta <= 12000:
-            score += 1
-        elif delta >= 25000:
+        elif duration_delta <= 6000:
+            score += 6
+        elif duration_delta <= 12000:
+            score += 2
+        elif duration_delta >= 30000:
             return CandidateExplanation(
                 score=0, reason_codes=("reject_duration_far",), signals=signals
             )
-        elif delta >= 15000:
-            score -= 14
+        elif duration_delta >= 20000:
+            score -= 16
+        elif duration_delta >= 15000:
+            score -= 10
         else:
-            score -= 6
+            score -= 4
+
     return CandidateExplanation(
         score=max(score, 1), reason_codes=tuple(reasons), signals=signals
     )
+
+
 
 
 def score_candidate(
@@ -880,8 +974,8 @@ def score_candidate(
     Uses deterministic heuristics combining ISRC, title, artist, album, duration and release year:
     - Exact ISRC match yields 100.
     - Requires either an exact normalised title match, an exact normalised-variant
-      ("core") title match, or — when ``policy.enable_guarded_fuzzy_normal`` is
-      true — a guarded fuzzy normalised-title match (similarity ≥ 0.90 plus
+      ("core") title match, or \u2014 when ``policy.enable_guarded_fuzzy_normal`` is
+      true \u2014 a guarded fuzzy normalised-title match (similarity ≥ 0.90 plus
       artist overlap and album/duration agreement) to produce a non-zero score.
     - Base score for title match is 27, with bonuses for exact normalised title, artist coverage, album match, and year; penalties for variant/edition mismatches.
     - ``candidate_duration_ms`` is used for album/duration agreement in the guarded-fuzzy path and for duration-mismatch penalties.
@@ -953,7 +1047,7 @@ def score_candidate_repair(
     if std > 0:
         return std
 
-    # Fuzzy fallback — repair mode only
+    # Fuzzy fallback \u2014 repair mode only
     norm_title = _normalise(row.track_name)
     norm_cand = _normalise(candidate_title)
     if not norm_title or not norm_cand:

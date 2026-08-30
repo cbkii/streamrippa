@@ -88,6 +88,13 @@ REASON_NO_RESULTS = "no results"
 REASON_SEARCH_FAILURE = "search failure"
 REASON_LOW_CONFIDENCE = "low confidence"
 REASON_QUALITY_UNAVAILABLE = "quality unavailable"
+REASON_NO_RESULTS_AFTER_BROAD = "no-results-after-broad-search"
+REASON_PROVIDER_SEARCH_ERROR = "provider-search-error"
+REASON_AMBIGUOUS = "ambiguous-candidates"
+REASON_TITLE_REJECTED = "candidates-found-but-title-rejected"
+REASON_ARTIST_REJECTED = "candidates-found-but-artist-rejected"
+REASON_VARIANT_CONFLICT = "variant-conflict"
+REASON_DURATION_CONFLICT = "duration-conflict"
 CONF_REJECT = "reject"
 CONF_LOW = "low"
 CONF_MEDIUM = "medium"
@@ -172,6 +179,7 @@ class ResolverOutcome:
     query: str
     strategy: str
     rejected: list[TrackCandidate] | None = None
+    attempts: tuple[dict[str, object], ...] = ()
 
 
 def _build_quality_sequence(source: str, max_quality: int) -> list[int]:
@@ -332,54 +340,91 @@ def _file_local_lookup_keys(path: Path) -> list[str]:
     return keys
 
 
+_BROAD_SEARCH_STRATEGIES: frozenset[str] = frozenset(
+    {"title-only", "canonical-title-only"}
+)
+
+
 def _build_search_queries(
     row: ExportifyCsvRow, source: str, *, escalation: bool = False
 ) -> list[tuple[str, str]]:
-    """Build deterministic layered queries for Exportify row resolution.
+    """Build a deterministic adaptive query plan from strong to broad identity.
 
-    Returns ``[(strategy, query), ...]`` in priority order:
-    1) ISRC-led (when available) for Deezer/Qobuz.
-    2) Structured title + multiple artists + album/year hints.
-    3) Generic fallback (legacy behaviour shape).
+    Album and release year remain scoring evidence rather than mandatory terms
+    in every provider query.  Broad title-only discovery is available in normal
+    mode, but candidates still pass the same strict acceptance scorer.
     """
-    first_artist = row.artists_list[0] if row.artists_list else row.artists_raw
-    artist_joined = " ".join(row.artists_list[:2]) if row.artists_list else first_artist
-    year = row.release_date[:4].strip() if row.release_date else ""
-    stripped_title = row.canonical_track_name or strip_title_decorators(row.track_name)
+    first_artist = _first_artist(row)
+    canonical_title = row.canonical_track_name or strip_title_decorators(row.track_name)
 
     queries: list[tuple[str, str]] = []
     if row.isrc and source in {"deezer", "qobuz"}:
         queries.append(("isrc", row.isrc))
 
-    structured = " ".join(
-        p for p in [row.track_name, artist_joined, row.album, year] if p
-    ).strip()
-    if structured:
-        queries.append(("structured", structured))
+    if row.album:
+        queries.append(
+            (
+                "structured",
+                " ".join(p for p in (row.track_name, first_artist, row.album) if p),
+            )
+        )
+        if canonical_title and canonical_title != row.track_name:
+            queries.append(
+                (
+                    "stripped-structured",
+                    " ".join(
+                        p for p in (canonical_title, first_artist, row.album) if p
+                    ),
+                )
+            )
 
-    if stripped_title and stripped_title != row.track_name:
-        stripped_structured = " ".join(
-            p for p in [stripped_title, first_artist, row.album, year] if p
-        ).strip()
-        if stripped_structured:
-            queries.append(("stripped-structured", stripped_structured))
+    queries.append(
+        ("generic", " ".join(p for p in (row.track_name, first_artist) if p))
+    )
+    if canonical_title and canonical_title != row.track_name:
+        queries.append(
+            (
+                "stripped-generic",
+                " ".join(p for p in (canonical_title, first_artist) if p),
+            )
+        )
 
-    generic = f"{row.track_name} {first_artist}".strip()
-    if generic:
-        queries.append(("generic", generic))
-    if stripped_title and stripped_title != row.track_name:
-        stripped_generic = f"{stripped_title} {first_artist}".strip()
-        if stripped_generic:
-            queries.append(("stripped-generic", stripped_generic))
+    queries.append(
+        ("artist-title", " ".join(p for p in (first_artist, row.track_name) if p))
+    )
+    if canonical_title and canonical_title != row.track_name:
+        queries.append(
+            (
+                "artist-canonical-title",
+                " ".join(p for p in (first_artist, canonical_title) if p),
+            )
+        )
+
+    if row.album:
+        queries.append(
+            ("title-album", " ".join(p for p in (row.track_name, row.album) if p))
+        )
+        if canonical_title and canonical_title != row.track_name:
+            queries.append(
+                (
+                    "canonical-title-album",
+                    " ".join(p for p in (canonical_title, row.album) if p),
+                )
+            )
+
+    # Broad discovery is normal-mode capable.  Acceptance remains strict.
+    queries.append(("title-only", row.track_name))
+    if canonical_title and canonical_title != row.track_name:
+        queries.append(("canonical-title-only", canonical_title))
 
     if escalation and row.album:
-        queries.append(("album-priority", f"{row.track_name} {row.album}".strip()))
-    if escalation:
-        queries.append(("title-only", row.track_name))
-        if stripped_title and stripped_title != row.track_name:
-            queries.append(("stripped-title-only", stripped_title))
+        queries.append(
+            (
+                "album-title-artist",
+                " ".join(p for p in (row.album, row.track_name, first_artist) if p),
+            )
+        )
 
-    # De-dupe by normalized query text while preserving deterministic order.
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
     for strategy, query in queries:
@@ -389,6 +434,43 @@ def _build_search_queries(
             seen.add(key)
             out.append((strategy, qn))
     return out
+
+
+def _select_best_candidate(
+    hits: list[tuple[str, str, TrackCandidate]],
+) -> tuple[str, str, TrackCandidate] | None:
+    """Select the strongest discovered candidate while preserving tie order."""
+    if not hits:
+        return None
+    confidence_rank = {CONF_REJECT: 0, CONF_LOW: 1, CONF_MEDIUM: 2, CONF_HIGH: 3}
+    _, best = max(
+        enumerate(hits),
+        key=lambda item: (
+            item[1][2].score,
+            confidence_rank.get(item[1][2].confidence, 0),
+            -item[0],
+        ),
+    )
+    return best
+
+
+def _rejection_reason(candidate: TrackCandidate | None) -> str:
+    if candidate is None:
+        return REASON_NO_RESULTS
+    reasons = set(candidate.reason_codes)
+    if "reject_title_mismatch" in reasons:
+        return REASON_TITLE_REJECTED
+    if "reject_artist_mismatch" in reasons or "reject_isrc_artist_conflict" in reasons:
+        return REASON_ARTIST_REJECTED
+    if "reject_variant_policy" in reasons or "reject_isrc_variant_conflict" in reasons:
+        return REASON_VARIANT_CONFLICT
+    if "reject_duration_far" in reasons or "reject_isrc_duration_conflict" in reasons:
+        return REASON_DURATION_CONFLICT
+    if "reject_bad_context" in reasons:
+        return "bad-context-conflict"
+    return "candidates-found-but-rejected"
+
+
 
 
 def _pick_best_candidate(
@@ -1825,18 +1907,7 @@ class PendingCsvPlaylist(Pending):
             *,
             escalation: bool = False,
         ) -> ResolverOutcome:
-            """
-            Resolve the best TrackCandidate for a single client by optionally using an ID hint and then running layered search queries.
-
-            Attempts an optional per-service ID hint (when repair mode and a hint exist); if that yields an acceptable match (score >= min_score) it is returned immediately. Otherwise runs the deterministic layered queries in order, scoring results with the configured picker and returning the first candidate that meets the minimum score. If no candidate meets the threshold the highest-scoring low-confidence candidate seen is returned. If any search invocation raised an exception and no candidate was selected, the outcome reason is `"search_failed"`. If no results were found and no errors occurred, the outcome reason is `"no results"`.
-
-            Returns:
-                ResolverOutcome: Outcome with:
-                  - candidate: the selected TrackCandidate or `None` if none found,
-                  - reason: one of `"matched"`, `"low confidence (score<min_score)"`, `"search_failed"`, or `"no results"`,
-                  - query: the query string that produced the returned candidate (or the last attempted query on failure),
-                  - strategy: the query strategy that produced the returned candidate (or the last attempted strategy on failure).
-            """
+            """Discover broadly, then choose the strongest strictly accepted match."""
             queries = _build_search_queries(row, client.source, escalation=escalation)
             provider_min_score = _provider_threshold(
                 csv_cfg, client.source, repair_mode=self.repair_mode
@@ -1851,16 +1922,20 @@ class PendingCsvPlaylist(Pending):
                     query="",
                     strategy="provider-disabled",
                 )
+
             best_low_conf: tuple[str, str, TrackCandidate] | None = None
             closest_rejected: list[TrackCandidate] = []
-            # Track best score per candidate ID to avoid double-counting the same
-            # track returned by multiple query strategies (structured + generic).
             best_score_by_id: dict[str, int] = {}
+            matched_hits: list[tuple[str, str, TrackCandidate]] = []
+            attempts: list[dict[str, object]] = []
             had_error = False
             last_query = ""
             last_strategy = ""
 
-            def _add_rejected(candidate: TrackCandidate, reason_code: str) -> None:
+            def _add_rejected(candidate: TrackCandidate, reason_code: str = "") -> None:
+                reason_codes = candidate.reason_codes
+                if reason_code and reason_code not in reason_codes:
+                    reason_codes = tuple((*reason_codes, reason_code))
                 enriched = TrackCandidate(
                     source=candidate.source,
                     id=candidate.id,
@@ -1871,14 +1946,37 @@ class PendingCsvPlaylist(Pending):
                     isrc=candidate.isrc,
                     score=candidate.score,
                     client=candidate.client,
-                    reason_codes=tuple((*candidate.reason_codes, reason_code)),
+                    reason_codes=reason_codes,
                     signals=candidate.signals,
                     confidence=candidate.confidence,
                     margin_to_second=candidate.margin_to_second,
                 )
+                for index, existing in enumerate(closest_rejected):
+                    if (existing.source, existing.id) == (enriched.source, enriched.id):
+                        if enriched.score > existing.score:
+                            closest_rejected[index] = enriched
+                        return
                 closest_rejected.append(enriched)
                 closest_rejected.sort(key=lambda c: c.score, reverse=True)
-                del closest_rejected[2:]
+                del closest_rejected[4:]
+
+            def _record_hit(
+                query: str, strategy: str, candidate: TrackCandidate
+            ) -> None:
+                for index, (_, _, existing) in enumerate(matched_hits):
+                    if existing.id == candidate.id and existing.source == candidate.source:
+                        if candidate.score > existing.score:
+                            matched_hits[index] = (query, strategy, candidate)
+                        return
+                matched_hits.append((query, strategy, candidate))
+
+            def _refresh_candidate_confidence(candidate: TrackCandidate) -> None:
+                candidate.margin_to_second = _margin_to_second_best(
+                    candidate.score, list(best_score_by_id.values())
+                )
+                candidate.confidence = _confidence_for_candidate(
+                    candidate, provider_min_score, candidate.margin_to_second
+                )
 
             hinted_id = ""
             if self.repair_mode and row.repair_candidate_ids:
@@ -1896,6 +1994,30 @@ class PendingCsvPlaylist(Pending):
                     else:
                         hinted_resp = await client.get_metadata(hinted_id, "track")
                     self._provider_after_call(client.source, ok=True, err=None)
+                    explain = explain_candidate_score(
+                        row,
+                        _item_title(client.source, hinted_resp),
+                        _item_artist(client.source, hinted_resp),
+                        _item_album(client.source, hinted_resp),
+                        _item_date(client.source, hinted_resp),
+                        _item_isrc(client.source, hinted_resp),
+                        _item_duration_ms(client.source, hinted_resp),
+                        policy=match_policy,
+                    )
+                    hinted_score = (
+                        score_candidate_repair(
+                            row,
+                            _item_title(client.source, hinted_resp),
+                            _item_artist(client.source, hinted_resp),
+                            _item_album(client.source, hinted_resp),
+                            _item_date(client.source, hinted_resp),
+                            _item_isrc(client.source, hinted_resp),
+                            _item_duration_ms(client.source, hinted_resp),
+                            policy=match_policy,
+                        )
+                        if self.repair_mode
+                        else explain.score
+                    )
                     hinted_candidate = TrackCandidate(
                         source=client.source,
                         id=str(hinted_resp.get("id", hinted_id)),
@@ -1904,58 +2026,52 @@ class PendingCsvPlaylist(Pending):
                         album=_item_album(client.source, hinted_resp),
                         release_date=_item_date(client.source, hinted_resp),
                         isrc=_item_isrc(client.source, hinted_resp),
-                        score=(
-                            score_candidate_repair(
-                                row,
-                                _item_title(client.source, hinted_resp),
-                                _item_artist(client.source, hinted_resp),
-                                _item_album(client.source, hinted_resp),
-                                _item_date(client.source, hinted_resp),
-                                _item_isrc(client.source, hinted_resp),
-                                _item_duration_ms(client.source, hinted_resp),
-                                policy=match_policy,
-                            )
-                            if self.repair_mode
-                            else score_candidate(
-                                row,
-                                _item_title(client.source, hinted_resp),
-                                _item_artist(client.source, hinted_resp),
-                                _item_album(client.source, hinted_resp),
-                                _item_date(client.source, hinted_resp),
-                                _item_isrc(client.source, hinted_resp),
-                                _item_duration_ms(client.source, hinted_resp),
-                                policy=match_policy,
-                            )
-                        ),
+                        score=hinted_score,
                         client=client,
+                        reason_codes=explain.reason_codes,
+                        signals=explain.signals,
                     )
-                    reason = _candidate_reason(hinted_candidate, provider_min_score)
-                    # The hinted lookup has no peer population yet; using the
-                    # candidate's own score as the population would yield
-                    # margin == score and inflate confidence to CONF_HIGH for
-                    # any passing match.  Use margin=0 (conservative baseline)
-                    # and record the score in best_score_by_id so that
-                    # subsequent search-query candidates are compared against it.
-                    hinted_candidate.margin_to_second = 0
-                    hinted_candidate.confidence = _confidence_for_candidate(
-                        hinted_candidate, provider_min_score, 0
+                    best_score_by_id[hinted_candidate.id] = hinted_candidate.score
+                    _refresh_candidate_confidence(hinted_candidate)
+                    attempts.append(
+                        {
+                            "strategy": "id-hint",
+                            "query": hinted_id,
+                            "result_count": 1,
+                            "shortlist_count": 1,
+                            "error": "",
+                        }
                     )
-                    best_score_by_id[hinted_candidate.id] = max(
-                        best_score_by_id.get(hinted_candidate.id, 0),
-                        hinted_candidate.score,
-                    )
-                    if reason == "matched":
+                    if hinted_candidate.score >= provider_min_score:
+                        # A repair candidate ID is a deterministic provider-track
+                        # identity captured by a previous resolver pass.  Once its
+                        # current metadata still clears the strict scorer, honour
+                        # it as the repair fast path instead of spending new search
+                        # calls trying to beat an already validated ID.
                         return ResolverOutcome(
                             candidate=hinted_candidate,
-                            reason=reason,
+                            reason="matched",
                             query=hinted_id,
                             strategy="id-hint",
                             rejected=closest_rejected,
+                            attempts=tuple(attempts),
                         )
-                    _add_rejected(hinted_candidate, "reject_below_threshold")
-                    best_low_conf = (hinted_id, "id-hint", hinted_candidate)
+                    elif hinted_candidate.score > 0:
+                        best_low_conf = (hinted_id, "id-hint", hinted_candidate)
+                        _add_rejected(hinted_candidate, "reject_below_threshold")
+                    else:
+                        _add_rejected(hinted_candidate)
                 except Exception as e:
                     self._provider_after_call(client.source, ok=False, err=e)
+                    attempts.append(
+                        {
+                            "strategy": "id-hint",
+                            "query": hinted_id,
+                            "result_count": 0,
+                            "shortlist_count": 0,
+                            "error": type(e).__name__,
+                        }
+                    )
                     logger.debug(
                         "Hinted metadata lookup failed on %s id=%s: %s",
                         client.source,
@@ -1969,10 +2085,29 @@ class PendingCsvPlaylist(Pending):
                     and self.provider_budgets[client.source].disabled
                 ):
                     break
+
+                # Do not spend a broad title-only call when a previous strong or
+                # alternate query already produced a clearly separated match.
+                if strategy in _BROAD_SEARCH_STRATEGIES and matched_hits:
+                    provisional = _select_best_candidate(matched_hits)
+                    if provisional is not None:
+                        _refresh_candidate_confidence(provisional[2])
+                        if (
+                            provisional[2].score >= provider_min_score + 10
+                            and provisional[2].confidence in {CONF_MEDIUM, CONF_HIGH}
+                        ):
+                            break
+
                 last_query = query
                 last_strategy = strategy
+                top_candidates: list[TrackCandidate] = []
+                pages: list[dict] = []
                 try:
-                    effective_limit = escalation_limit if escalation else search_limit
+                    effective_limit = (
+                        escalation_limit
+                        if escalation or strategy in _BROAD_SEARCH_STRATEGIES
+                        else search_limit
+                    )
                     cache_key = (client.source, query.casefold(), effective_limit)
                     if self.query_cache is not None and cache_key in self.query_cache:
                         pages = self.query_cache[cache_key]
@@ -1990,6 +2125,8 @@ class PendingCsvPlaylist(Pending):
                         self._provider_after_call(client.source, ok=True, err=None)
                         if self.query_cache is not None:
                             self.query_cache[cache_key] = pages
+
+                    raw_items = _extract_raw_results(client.source, pages)
                     top_candidates = _pick_top_candidates(
                         row,
                         client.source,
@@ -1999,22 +2136,42 @@ class PendingCsvPlaylist(Pending):
                         limit=_SHORTLIST_K,
                         policy=match_policy,
                     )
-                    if top_candidates:
-                        for cand in top_candidates:
-                            _cid = cand.id
-                            best_score_by_id[_cid] = max(
-                                best_score_by_id.get(_cid, 0), cand.score
-                            )
-                        _population = list(best_score_by_id.values())
-                        for cand in top_candidates:
-                            cand.margin_to_second = _margin_to_second_best(
-                                cand.score, _population
-                            )
-                            cand.confidence = _confidence_for_candidate(
-                                cand, provider_min_score, cand.margin_to_second
-                            )
+                    attempts.append(
+                        {
+                            "strategy": strategy,
+                            "query": query,
+                            "result_count": len(raw_items),
+                            "shortlist_count": len(top_candidates),
+                            "error": "",
+                        }
+                    )
+                    for rejected in _top_rejected_candidates(
+                        row,
+                        client.source,
+                        pages,
+                        client,
+                        policy=match_policy,
+                        limit=2,
+                    ):
+                        _add_rejected(rejected)
+
+                    for cand in top_candidates:
+                        best_score_by_id[cand.id] = max(
+                            best_score_by_id.get(cand.id, 0), cand.score
+                        )
+                    for cand in top_candidates:
+                        _refresh_candidate_confidence(cand)
                 except Exception as e:
                     self._provider_after_call(client.source, ok=False, err=e)
+                    attempts.append(
+                        {
+                            "strategy": strategy,
+                            "query": query,
+                            "result_count": 0,
+                            "shortlist_count": 0,
+                            "error": type(e).__name__,
+                        }
+                    )
                     if (
                         self.provider_budgets is not None
                         and self.provider_budgets[client.source].disabled
@@ -2033,24 +2190,52 @@ class PendingCsvPlaylist(Pending):
                 for candidate in top_candidates:
                     reason = _candidate_reason(candidate, provider_min_score)
                     if reason == "matched":
-                        rejected = closest_rejected + _top_rejected_candidates(
-                            row,
-                            client.source,
-                            pages,
-                            client,
-                            policy=match_policy,
-                            limit=2,
-                        )
-                        rejected.sort(key=lambda c: c.score, reverse=True)
-                        return ResolverOutcome(
-                            candidate, reason, query, strategy, rejected=rejected[:2]
-                        )
-                    if (
-                        best_low_conf is None
-                        or candidate.score > best_low_conf[2].score
-                    ):
-                        best_low_conf = (query, strategy, candidate)
-                    _add_rejected(candidate, "reject_below_threshold")
+                        _record_hit(query, strategy, candidate)
+                        if (
+                            candidate.score == 100
+                            and "accepted_isrc_match" in candidate.reason_codes
+                        ):
+                            return ResolverOutcome(
+                                candidate=candidate,
+                                reason="matched",
+                                query=query,
+                                strategy=strategy,
+                                rejected=closest_rejected[:2],
+                                attempts=tuple(attempts),
+                            )
+                    else:
+                        if (
+                            best_low_conf is None
+                            or candidate.score > best_low_conf[2].score
+                        ):
+                            best_low_conf = (query, strategy, candidate)
+                        _add_rejected(candidate, "reject_below_threshold")
+
+            selected_hit = _select_best_candidate(matched_hits)
+            if selected_hit is not None:
+                query, strategy, candidate = selected_hit
+                _refresh_candidate_confidence(candidate)
+                if (
+                    strategy in _BROAD_SEARCH_STRATEGIES
+                    and candidate.margin_to_second <= 2
+                    and candidate.score < 95
+                ):
+                    return ResolverOutcome(
+                        candidate=candidate,
+                        reason=REASON_AMBIGUOUS,
+                        query=query,
+                        strategy=strategy,
+                        rejected=closest_rejected[:2],
+                        attempts=tuple(attempts),
+                    )
+                return ResolverOutcome(
+                    candidate=candidate,
+                    reason="matched",
+                    query=query,
+                    strategy=strategy,
+                    rejected=closest_rejected[:2],
+                    attempts=tuple(attempts),
+                )
 
             if best_low_conf is not None:
                 query, strategy, candidate = best_low_conf
@@ -2060,51 +2245,69 @@ class PendingCsvPlaylist(Pending):
                     query=query,
                     strategy=strategy,
                     rejected=closest_rejected[:2],
+                    attempts=tuple(attempts),
                 )
+
+            if closest_rejected:
+                candidate = closest_rejected[0]
+                return ResolverOutcome(
+                    candidate=candidate,
+                    reason=_rejection_reason(candidate),
+                    query=last_query,
+                    strategy=last_strategy,
+                    rejected=closest_rejected[:2],
+                    attempts=tuple(attempts),
+                )
+
             if had_error:
                 return ResolverOutcome(
                     candidate=None,
-                    reason=REASON_SEARCH_FAILURE,
+                    reason=REASON_PROVIDER_SEARCH_ERROR,
                     query=last_query,
                     strategy=last_strategy,
+                    attempts=tuple(attempts),
                 )
+
+            attempted_broad = any(
+                str(attempt.get("strategy", "")) in _BROAD_SEARCH_STRATEGIES
+                for attempt in attempts
+            )
             return ResolverOutcome(
                 candidate=None,
-                reason=REASON_NO_RESULTS,
-                query=queries[-1][1] if queries else "",
-                strategy=queries[-1][0] if queries else "",
+                reason=(REASON_NO_RESULTS_AFTER_BROAD if attempted_broad else REASON_NO_RESULTS),
+                query=" || ".join(str(a.get("query", "")) for a in attempts if a.get("query")),
+                strategy=" / ".join(
+                    str(a.get("strategy", "")) for a in attempts if a.get("strategy")
+                ),
                 rejected=closest_rejected[:2],
+                attempts=tuple(attempts),
             )
 
         primary_outcome = await _resolve_for_client(
             self.primary_client, escalation=False
         )
 
-        # Search fallback service if configured
-        if self.fallback_client is not None and not (
-            primary_outcome.candidate is not None
-            and primary_outcome.candidate.score >= primary_min_score
-        ):
+        def _eligible_for_escalation(outcome: ResolverOutcome) -> bool:
+            return outcome.reason == REASON_NO_RESULTS or outcome.reason == REASON_NO_RESULTS_AFTER_BROAD or outcome.reason.startswith(REASON_LOW_CONFIDENCE)
+
+        # Search fallback service if configured and primary did not strictly match.
+        if self.fallback_client is not None and primary_outcome.reason != "matched":
             fallback_outcome = await _resolve_for_client(
                 self.fallback_client, escalation=False
             )
-        if (
-            primary_outcome.candidate is None
-            or primary_outcome.candidate.score < primary_min_score
-        ):
+
+        # Only repeat with the expanded result window for genuine discovery
+        # misses. Provider errors and explicit safety rejections are terminal for
+        # this row/provider and must not be amplified into repeated calls.
+        if _eligible_for_escalation(primary_outcome):
             primary_outcome = await _resolve_for_client(
                 self.primary_client, escalation=True
             )
         if (
             self.fallback_client is not None
-            and (
-                fallback_outcome.candidate is None
-                or fallback_outcome.candidate.score < fallback_min_score
-            )
-            and (
-                primary_outcome.candidate is None
-                or primary_outcome.candidate.score < primary_min_score
-            )
+            and fallback_outcome.reason != "matched"
+            and _eligible_for_escalation(fallback_outcome)
+            and primary_outcome.reason != "matched"
         ):
             fallback_outcome = await _resolve_for_client(
                 self.fallback_client, escalation=True
@@ -2112,13 +2315,15 @@ class PendingCsvPlaylist(Pending):
 
         primary_candidate = (
             primary_outcome.candidate
-            if primary_outcome.candidate
+            if primary_outcome.reason == "matched"
+            and primary_outcome.candidate
             and primary_outcome.candidate.score >= primary_min_score
             else None
         )
         fallback_candidate = (
             fallback_outcome.candidate
-            if fallback_outcome.candidate
+            if fallback_outcome.reason == "matched"
+            and fallback_outcome.candidate
             and fallback_outcome.candidate.score >= fallback_min_score
             else None
         )
@@ -2248,6 +2453,7 @@ class PendingCsvPlaylist(Pending):
                         "rejected": _rejected_candidate_payloads(
                             primary_outcome.rejected
                         ),
+                        "attempts": list(primary_outcome.attempts),
                     },
                     "fallback": {
                         "source": (
@@ -2259,6 +2465,7 @@ class PendingCsvPlaylist(Pending):
                         "rejected": _rejected_candidate_payloads(
                             fallback_outcome.rejected
                         ),
+                        "attempts": list(fallback_outcome.attempts),
                     },
                 },
                 "selected": _candidate_payload(selected),

@@ -291,7 +291,7 @@ def test_build_search_queries_dedupes_identical_normalized_queries():
 # ---------------------------------------------------------------------------
 
 
-def test_pick_best_candidate_isrc_wins():
+def test_pick_best_candidate_isrc_wins_when_context_is_safe():
     row = _make_row(isrc="ISRC001")
     client = _make_client("deezer")
     pages = [
@@ -299,10 +299,10 @@ def test_pick_best_candidate_isrc_wins():
             "data": [
                 {
                     "id": 1,
-                    "title": "Wrong Song",
-                    "artist": {"name": "X"},
+                    "title": "Song",
+                    "artist": {"name": "Artist"},
                     "isrc": "ISRC001",
-                    "album": {"title": ""},
+                    "album": {"title": "Later Compilation"},
                 },
                 {
                     "id": 2,
@@ -1093,7 +1093,7 @@ async def test_pending_csv_playlist_low_confidence_result_marked_unresolved(tmp_
 
     with open(unresolved_path, encoding="utf-8") as fh:
         content = fh.read()
-    assert ("low confidence" in content) or ("no results" in content)
+    assert "variant-conflict" in content
     assert "query_strategy" in content
     assert "attempted_query" in content
     assert "primary_reject_1" in content
@@ -1440,7 +1440,7 @@ async def test_pending_csv_playlist_search_errors_are_logged_as_search_failed(tm
 
     with open(unresolved_path, encoding="utf-8") as fh:
         content = fh.read()
-    assert "search failure" in content
+    assert "provider-search-error" in content
 
 
 @pytest.mark.asyncio

@@ -45,13 +45,13 @@ def test_normal_query_plan_broadens_without_requiring_year() -> None:
     strategies = [strategy for strategy, _ in queries]
     query_map = dict(queries)
 
-    assert "title-artist-album" in strategies
-    assert "title-artist" in strategies
+    assert "structured" in strategies
+    assert "generic" in strategies
     assert "artist-title" in strategies
     assert "title-album" in strategies
     assert "title-only" in strategies
-    assert "2005" not in query_map["title-artist-album"]
-    assert strategies.index("title-artist") < strategies.index("title-only")
+    assert "2005" not in query_map["structured"]
+    assert strategies.index("generic") < strategies.index("title-only")
     assert len([q.casefold() for _, q in queries]) == len(
         set(q.casefold() for _, q in queries)
     )
