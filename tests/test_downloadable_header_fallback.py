@@ -45,6 +45,7 @@ async def test_basic_downloadable_falls_back_to_aiohttp_for_excessive_headers(
         source="qobuz",
     )
 
+    # Keep one stable callback object so both transfer paths can be asserted.
     def callback(_size: int) -> None:
         return None
 
