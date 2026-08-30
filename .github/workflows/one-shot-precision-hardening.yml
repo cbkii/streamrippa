@@ -1,0 +1,164 @@
+name: One-shot resolver precision hardening
+
+on:
+  push:
+    branches:
+      - cx/csv-resolver-recall-precision
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cx/csv-resolver-recall-precision
+          fetch-depth: 0
+
+      - name: Apply precision guard and regressions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("streamrip/file_lists.py")
+          text = source.read_text()
+
+          old_artist_match = '''    query_pattern = re.compile(rf"(?<!\\w){re.escape(query)}(?!\\w)")
+              result_pattern = re.compile(rf"(?<!\\w){re.escape(result)}(?!\\w)")
+              return bool(query_pattern.search(result) or result_pattern.search(query))
+          '''.replace("              ", "    ")
+          new_artist_match = '''    query_pattern = re.compile(rf"(?<!\\w){re.escape(query)}(?!\\w)")
+              return bool(query_pattern.search(result))
+          '''.replace("              ", "    ")
+          if old_artist_match not in text:
+              raise SystemExit("artist match block not found")
+          text = text.replace(old_artist_match, new_artist_match, 1)
+
+          old_coverage = '''    coverage = _artist_coverage(artist_inputs, candidate_artist)
+              signals["artist_coverage"] = round(coverage, 3)
+              if coverage >= 1.0:
+                  score += 26
+              elif coverage >= 0.5:
+                  score += 14
+              elif artist_ok:
+                  score += 8
+              else:
+                  return CandidateExplanation(
+                      score=0,
+                      reason_codes=("reject_artist_mismatch",),
+                      signals=signals,
+                  )
+          '''.replace("              ", "    ")
+          new_coverage = '''    coverage = _artist_coverage(artist_inputs, candidate_artist)
+              raw_artist_ok = bool(
+                  row.artists_raw
+                  and _artist_term_matches(row.artists_raw, candidate_artist)
+              )
+              ambiguous_comma_credit = bool(
+                  row.artists_raw and "," in row.artists_raw and ";" not in row.artists_raw
+              )
+              signals["artist_coverage"] = round(coverage, 3)
+              signals["artist_raw_match"] = raw_artist_ok
+              signals["artist_credit_ambiguous_comma"] = ambiguous_comma_credit
+              if coverage >= 1.0:
+                  score += 26
+              elif coverage >= 0.5:
+                  if (
+                      ambiguous_comma_credit
+                      and not raw_artist_ok
+                      and not (album_ok or duration_ok)
+                  ):
+                      return CandidateExplanation(
+                          score=0,
+                          reason_codes=("reject_artist_mismatch",),
+                          signals=signals,
+                      )
+                  score += 14
+              elif artist_ok:
+                  score += 8
+              else:
+                  return CandidateExplanation(
+                      score=0,
+                      reason_codes=("reject_artist_mismatch",),
+                      signals=signals,
+                  )
+          '''.replace("              ", "    ")
+          if old_coverage not in text:
+              raise SystemExit("artist coverage block not found")
+          source.write_text(text.replace(old_coverage, new_coverage, 1))
+
+          tests = Path("tests/test_csv_resolver_overhaul.py")
+          test_text = tests.read_text()
+          marker = "def test_comma_bearing_single_artist_fragment_does_not_pass_without_context"
+          if marker not in test_text:
+              test_text += '''\n\n
+def test_comma_bearing_single_artist_fragment_does_not_pass_without_context() -> None:
+    explanation = explain_candidate_score(
+        _row(
+            track_name="Song",
+            canonical_track_name="Song",
+            artists_raw="Tyler, The Creator",
+            artists_list=["Tyler", "The Creator"],
+            album="",
+            duration_ms=None,
+        ),
+        "Song",
+        "Tyler",
+        "",
+        "",
+        "",
+        None,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score == 0
+    assert "reject_artist_mismatch" in explanation.reason_codes
+
+
+def test_comma_separated_multi_artist_primary_can_pass_with_duration_context() -> None:
+    explanation = explain_candidate_score(
+        _row(
+            track_name="Good Day",
+            canonical_track_name="Good Day",
+            artists_raw="Greg Street, Nappy Roots",
+            artists_list=["Greg Street", "Nappy Roots"],
+            album="",
+            duration_ms=221000,
+        ),
+        "Good Day",
+        "Greg Street",
+        "",
+        "",
+        "",
+        221500,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score >= 50
+    assert explanation.signals["artist_coverage"] == 0.5
+'''
+              tests.write_text(test_text)
+          PY
+
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: format streamrip/file_lists.py tests/test_csv_resolver_overhaul.py
+
+      - name: Run focused resolver tests
+        shell: bash
+        run: |
+          python -m pip install -q pytest pytest-asyncio aiofiles aiohttp requests m3u8 pycryptodomex pillow mutagen pathvalidate tomlkit click rich appdirs simple-term-menu aiolimiter deezer-py aiodns
+          PYTHONPATH=. pytest -q tests/test_csv_resolver_overhaul.py
+
+      - name: Commit hardening and remove this workflow
+        shell: bash
+        run: |
+          git rm .github/workflows/one-shot-precision-hardening.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add streamrip/file_lists.py tests/test_csv_resolver_overhaul.py
+          git commit -m "Harden ambiguous comma artist matching [precision-hardened]"
+          git push origin HEAD:cx/csv-resolver-recall-precision
