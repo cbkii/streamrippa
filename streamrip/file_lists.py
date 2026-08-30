@@ -372,8 +372,7 @@ def _artist_term_matches(query_artist: str, result_artist: str) -> bool:
         return False
 
     query_pattern = re.compile(rf"(?<!\w){re.escape(query)}(?!\w)")
-    result_pattern = re.compile(rf"(?<!\w){re.escape(result)}(?!\w)")
-    return bool(query_pattern.search(result) or result_pattern.search(query))
+    return bool(query_pattern.search(result))
 
 
 def _artist_overlap(query_artists: list[str], result_artist: str) -> bool:
@@ -890,10 +889,28 @@ def _score_candidate_internal(
         reasons.append("accepted_guarded_fuzzy")
 
     coverage = _artist_coverage(artist_inputs, candidate_artist)
+    raw_artist_ok = bool(
+        row.artists_raw and _artist_term_matches(row.artists_raw, candidate_artist)
+    )
+    ambiguous_comma_credit = bool(
+        row.artists_raw and "," in row.artists_raw and ";" not in row.artists_raw
+    )
     signals["artist_coverage"] = round(coverage, 3)
+    signals["artist_raw_match"] = raw_artist_ok
+    signals["artist_credit_ambiguous_comma"] = ambiguous_comma_credit
     if coverage >= 1.0:
         score += 26
     elif coverage >= 0.5:
+        if (
+            ambiguous_comma_credit
+            and not raw_artist_ok
+            and not (album_ok or duration_ok)
+        ):
+            return CandidateExplanation(
+                score=0,
+                reason_codes=("reject_artist_mismatch",),
+                signals=signals,
+            )
         score += 14
     elif artist_ok:
         score += 8

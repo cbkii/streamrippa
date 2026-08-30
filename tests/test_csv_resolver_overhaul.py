@@ -379,3 +379,49 @@ def test_repair_does_not_semantically_guess_different_de_la_soul_title() -> None
     )
 
     assert explanation.score == 0
+
+
+def test_comma_bearing_single_artist_fragment_does_not_pass_without_context() -> None:
+    explanation = explain_candidate_score(
+        _row(
+            track_name="Song",
+            canonical_track_name="Song",
+            artists_raw="Tyler, The Creator",
+            artists_list=["Tyler", "The Creator"],
+            album="",
+            duration_ms=None,
+        ),
+        "Song",
+        "Tyler",
+        "",
+        "",
+        "",
+        None,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score == 0
+    assert "reject_artist_mismatch" in explanation.reason_codes
+
+
+def test_comma_separated_multi_artist_primary_can_pass_with_duration_context() -> None:
+    explanation = explain_candidate_score(
+        _row(
+            track_name="Good Day",
+            canonical_track_name="Good Day",
+            artists_raw="Greg Street, Nappy Roots",
+            artists_list=["Greg Street", "Nappy Roots"],
+            album="",
+            duration_ms=221000,
+        ),
+        "Good Day",
+        "Greg Street",
+        "",
+        "",
+        "",
+        221500,
+        policy=MatchPolicy(),
+    )
+
+    assert explanation.score >= 50
+    assert explanation.signals["artist_coverage"] == 0.5
