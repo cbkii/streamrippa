@@ -48,7 +48,7 @@ class QobuzPrompter(CredentialPrompter):
 
     def has_creds(self) -> bool:
         c = self.config.session.qobuz
-        return c.email_or_userid != "" and c.password_or_token != ""
+        return bool(c.password_or_token and (c.use_auth_token or c.email_or_userid))
 
     async def prompt_and_login(self):
         if not self.has_creds():
@@ -65,22 +65,23 @@ class QobuzPrompter(CredentialPrompter):
                 self._prompt_creds_and_set_session_config()
 
     def _prompt_creds_and_set_session_config(self):
+        c = self.config.session.qobuz
+        if c.use_auth_token:
+            c.password_or_token = Prompt.ask(
+                "Enter your Qobuz session token", password=True
+            )
+            return
         email = Prompt.ask("Enter your Qobuz email")
         pwd_input = Prompt.ask("Enter your Qobuz password (invisible)", password=True)
 
         pwd = hashlib.md5(pwd_input.encode("utf-8")).hexdigest()
-        console.print(
-            f"[green]Credentials saved to config file at [bold cyan]{self.config.path}",
-        )
-        c = self.config.session.qobuz
-        c.use_auth_token = False
         c.email_or_userid = email
         c.password_or_token = pwd
 
     def save(self):
         c = self.config.session.qobuz
         cf = self.config.file.qobuz
-        cf.use_auth_token = False
+        cf.use_auth_token = c.use_auth_token
         cf.email_or_userid = c.email_or_userid
         cf.password_or_token = c.password_or_token
         self.config.file.set_modified()

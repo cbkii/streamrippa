@@ -63,7 +63,7 @@ async def aiohttp_call_with_retry(
                     status or "unknown",
                     attempt,
                     safe_attempts,
-                    exc,
+                    type(exc).__name__,
                 )
                 raise
             logger.warning(
@@ -73,7 +73,7 @@ async def aiohttp_call_with_retry(
                 attempt,
                 safe_attempts,
                 current_delay,
-                exc,
+                type(exc).__name__,
             )
             await asyncio.sleep(current_delay)
             current_delay *= safe_backoff
@@ -87,7 +87,7 @@ async def aiohttp_call_with_retry(
                     reason,
                     attempt,
                     safe_attempts,
-                    exc,
+                    type(exc).__name__,
                 )
                 raise
             logger.warning(
@@ -97,7 +97,7 @@ async def aiohttp_call_with_retry(
                 attempt,
                 safe_attempts,
                 current_delay,
-                exc,
+                type(exc).__name__,
             )
             await asyncio.sleep(current_delay)
             current_delay *= safe_backoff

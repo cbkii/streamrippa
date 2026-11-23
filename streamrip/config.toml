@@ -39,9 +39,9 @@ download_booklets = false
 
 # Authenticate to Qobuz using auth token? Value can be true/false only
 use_auth_token = false
-# Enter your userid if the above use_auth_token is set to true, else enter your email
+# Token mode ignores the legacy user ID. Password mode requires your email.
 email_or_userid = ""
-# Enter your auth token if the above use_auth_token is set to true, else enter the md5 hash of your plaintext password
+# Browser session token in token mode, MD5 password hash in legacy password mode.
 password_or_token = ""
 # Do not change
 app_id = ""

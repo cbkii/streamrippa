@@ -112,13 +112,13 @@ class Main:
         """
         parsed = parse_url(url)
         if parsed is None:
-            raise Exception(f"Unable to parse url {url}")
+            raise ValueError("Unable to parse media URL")
 
         client = await self.get_logged_in_client(parsed.source)
         self.pending.append(
             await parsed.into_pending(client, self.config, self.database),
         )
-        logger.debug("Added url=%s", url)
+        logger.debug("Added media URL for %s", parsed.source)
 
     async def add_by_id(self, source: str, media_type: str, id: str):
         client = await self.get_logged_in_client(source)
@@ -153,7 +153,7 @@ class Main:
         for i, p in enumerate(parsed):
             if p is None:
                 console.print(
-                    f"[red]Found invalid url [cyan]{urls[i]}[/cyan], skipping.",
+                    f"[red]Invalid URL at input {i + 1}, skipping.",
                 )
                 continue
             url_client_pairs.append((p, await self.get_logged_in_client(p.source)))

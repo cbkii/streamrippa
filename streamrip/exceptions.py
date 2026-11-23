@@ -80,3 +80,7 @@ class DownloadError(Exception):
 
 class SslHelpPromptError(Exception):
     """Raised when CLI should present SSL troubleshooting guidance."""
+
+
+class QobuzRequestError(NonStreamableError):
+    """A safely formatted Qobuz transport or protocol failure."""

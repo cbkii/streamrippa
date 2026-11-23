@@ -76,7 +76,7 @@
       userId: safeLocalGet(SAVE_KEYS.userId) || '',
       token: safeLocalGet(SAVE_KEYS.token) || '',
       appId: safeLocalGet(SAVE_KEYS.appId) || '',
-      source: safeLocalGet(SAVE_KEYS.source) || '',
+      source: captureCategory(safeLocalGet(SAVE_KEYS.source)),
       capturedAt: safeLocalGet(SAVE_KEYS.capturedAt) || '',
     };
   }
@@ -88,7 +88,7 @@
     const existing = loadSaved();
     const userId = normaliseUserId(input && input.userId) || existing.userId || findUserIdFromStorage() || '';
     const appId = normaliseAppId(input && input.appId) || existing.appId || '';
-    const source = String((input && input.source) || 'unknown').slice(0, 180);
+    const source = captureCategory(input && input.source);
     const capturedAt = nowIso();
 
     safeLocalSet(SAVE_KEYS.token, token);
@@ -101,9 +101,16 @@
     else if (/response/i.test(source)) state.counters.responseHits += 1;
     else if (/storage|localuser|sessionStorage|localStorage/i.test(source)) state.counters.storageHits += 1;
 
-    log('captured', { source, userId: userId || '(none)', token: redact(token), appId: appId || '(none)' });
+    log('captured', { source });
     renderBanner(false);
     return true;
+  }
+
+  function captureCategory(source) {
+    if (/header/i.test(source)) return 'request header';
+    if (/response/i.test(source)) return 'response';
+    if (/storage|localuser/i.test(source)) return 'browser storage';
+    return 'web player';
   }
 
   function normaliseToken(value) {
@@ -431,9 +438,9 @@
     try { page = getPageWindow(); } catch (_) { return false; }
     if (!page || page.__streamrippaQobuzHookInstalled) return Boolean(page && page.__streamrippaQobuzHookInstalled);
 
-    try { patchWindowFetch(page); } catch (err) { warn('unsafeWindow fetch patch failed', err); }
-    try { patchWindowXHR(page); } catch (err) { warn('unsafeWindow XHR patch failed', err); }
-    try { patchWindowRequest(page); } catch (err) { warn('unsafeWindow Request patch failed', err); }
+    try { patchWindowFetch(page); } catch (err) { warn('unsafeWindow fetch patch failed', shortErr(err)); }
+    try { patchWindowXHR(page); } catch (err) { warn('unsafeWindow XHR patch failed', shortErr(err)); }
+    try { patchWindowRequest(page); } catch (err) { warn('unsafeWindow Request patch failed', shortErr(err)); }
 
     try { page.__streamrippaQobuzHookInstalled = true; } catch (_) {}
     state.unsafeHook = true;
@@ -560,8 +567,8 @@
         if (k === 'x-user-id' || k === 'user_id' || k === 'userid') userId = v;
         if (k === 'x-app-id' || k === 'app_id' || k === 'appid') appId = v;
       }
-      if (token) post({ kind: 'capture', token: token, userId: userId, appId: appId, captureSource: source, detail: url || '' });
-      if (appId && !token) post({ kind: 'app_id', appId: appId, captureSource: source, detail: url || '' });
+      if (token) post({ kind: 'capture', token: token, userId: userId, appId: appId, captureSource: source });
+      if (appId && !token) post({ kind: 'app_id', appId: appId, captureSource: source });
     }
     function scanText(text, source, url) {
       text = String(text || '');
@@ -570,7 +577,7 @@
       if (!tokenMatch) return;
       const idMatch = text.match(/["'](?:user[_-]?id|userid|id)["']\s*:\s*["']?(\d{2,})["']?/i);
       const appMatch = text.match(/["'](?:x-app-id|app_id|appId)["']\s*[:=]\s*["']?([^"',}\s]{6,100})["']?/i);
-      post({ kind: 'capture', token: tokenMatch[1], userId: idMatch ? idMatch[1] : '', appId: appMatch ? appMatch[1] : '', captureSource: source, detail: url || '' });
+      post({ kind: 'capture', token: tokenMatch[1], userId: idMatch ? idMatch[1] : '', appId: appMatch ? appMatch[1] : '', captureSource: source });
     }
 
     try {
@@ -593,7 +600,7 @@
         window.fetch = patchedFetch;
         post({ kind: 'status', part: 'fetch', ok: true });
       }
-    } catch (e) { post({ kind: 'status', part: 'fetch', ok: false, error: String(e && e.message || e) }); }
+    } catch (e) { post({ kind: 'status', part: 'fetch', ok: false, error: 'hook unavailable' }); }
 
     try {
       const OriginalXHR = window.XMLHttpRequest;
@@ -617,7 +624,7 @@
         window.XMLHttpRequest = PatchedXHR;
         post({ kind: 'status', part: 'xhr', ok: true });
       }
-    } catch (e) { post({ kind: 'status', part: 'xhr', ok: false, error: String(e && e.message || e) }); }
+    } catch (e) { post({ kind: 'status', part: 'xhr', ok: false, error: 'hook unavailable' }); }
 
     try {
       const originalSetItem = Storage && Storage.prototype && Storage.prototype.setItem;
@@ -630,7 +637,7 @@
         try { Object.defineProperty(Storage.prototype.setItem, '__streamrippaPagePatched', { value: true }); } catch (_) {}
         post({ kind: 'status', part: 'storage', ok: true });
       }
-    } catch (e) { post({ kind: 'status', part: 'storage', ok: false, error: String(e && e.message || e) }); }
+    } catch (e) { post({ kind: 'status', part: 'storage', ok: false, error: 'hook unavailable' }); }
   }
 
   function onPagePayload(payload) {
@@ -867,7 +874,7 @@
     } catch (_) {}
   }
 
-  function shortErr(err) { return String((err && (err.message || err.name)) || err || '').slice(0, 160); }
+  function shortErr(err) { return err instanceof TypeError ? 'type error' : 'operation failed'; }
 
   function installRouteAndStorageWatchers() {
     try {
@@ -916,7 +923,7 @@
     } else {
       setTimeout(() => { renderBanner(true); scanAll('already loaded'); }, 0);
     }
-    log('loaded', { version: VERSION, href: location.href });
+    log('loaded', { version: VERSION });
   }
 
   boot();

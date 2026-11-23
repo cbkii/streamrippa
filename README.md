@@ -173,7 +173,31 @@ For safe experimentation, use `--config-path` and point `[downloads]` / `[databa
 ## Troubleshooting quick reference
 
 - SSL errors: validate system certificates first; use `--no-ssl-verify` only as a temporary workaround.
-- Authentication failures (Qobuz/Tidal/Deezer): refresh credentials via `rip config` and verify token/cookie fields.
+- For Tidal or Deezer authentication failures, verify the configured token or cookie.
+
+#### Qobuz authentication
+
+For an existing web-player session, set `[qobuz].use_auth_token = true` and put the session's
+`user_auth_token` in `password_or_token` in your private config. An existing numeric
+`email_or_userid` may stay in place. Streamrippa sends the token and app ID in API headers
+and checks one page of private favorites. It does not renew browser tokens automatically.
+Replace an expired token locally from a fresh Qobuz session. If a token appeared in a
+traceback, revoke the exposed session through Qobuz or contact support before reusing the account.
+
+Legacy email and MD5 password-hash configurations use a single form POST to `user/login`.
+Availability of that login depends on Qobuz. Use a browser session where interactive
+sign-in is required. Keep the app ID associated with your session and its matching signing
+credentials together. Search validates account access. Requesting a full track separately
+checks streaming entitlement, the signing credentials, and media delivery.
+
+To check the session without downloading, run
+`rip search --num-results 1 --output-file results.json qobuz track "One More Time"`.
+A JSON 401 can indicate rejected credentials or an app-ID mismatch. An HTML 403 means
+the request was denied before a usable API response arrived. Ask Qobuz support to
+check access for the affected network. HTTP 410 on `track/getFileUrl` means single-file
+delivery is unavailable on that endpoint. Changing tokens cannot restore a retired endpoint.
+For troubleshooting, share only the endpoint name, HTTP status and content type.
+Keep request URLs, tokens, cookies, config files and raw response bodies private.
 - Slow or flaky downloads: tune `[reliability]` retry/backoff and `[downloads]` concurrency/timeouts.
 - Conversion issues: ensure `ffmpeg` is installed and accessible on `PATH`.
 

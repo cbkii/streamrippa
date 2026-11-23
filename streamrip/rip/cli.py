@@ -20,6 +20,13 @@ from rich.traceback import install
 from .. import __version__, db
 from ..config import DEFAULT_CONFIG_PATH, Config, OutdatedConfigError, set_user_defaults
 from ..console import console
+from ..exceptions import (
+    AuthenticationError,
+    IneligibleError,
+    InvalidAppIdError,
+    InvalidAppSecretError,
+    QobuzRequestError,
+)
 from ..utils.ssl_utils import get_aiohttp_connector_kwargs
 from .main import Main
 
@@ -61,7 +68,16 @@ def _effective_csv_sources(
 def coro(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        return asyncio.run(f(*args, **kwargs))
+        try:
+            return asyncio.run(f(*args, **kwargs))
+        except (
+            AuthenticationError,
+            IneligibleError,
+            InvalidAppIdError,
+            InvalidAppSecretError,
+            QobuzRequestError,
+        ) as exc:
+            raise click.ClickException(str(exc) or "Authentication failed") from None
 
     return wrapper
 
@@ -203,7 +219,7 @@ def rip(
         c = Config(config_path)
     except Exception as e:
         console.print(
-            f"Error loading config from [bold cyan]{config_path}[/bold cyan]: {e}\n"
+            f"Error loading config from [bold cyan]{config_path}[/bold cyan]: {type(e).__name__}\n"
             "Try running [bold]rip config reset[/bold]",
         )
         ctx.obj["config"] = None

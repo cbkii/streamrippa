@@ -19,10 +19,11 @@ from ..exceptions import (
     InvalidAppSecretError,
     MissingCredentialsError,
     NonStreamableError,
+    QobuzRequestError,
 )
 from ..utils.network import aiohttp_call_with_retry
 from .client import Client
-from .downloadable import BasicDownloadable, Downloadable
+from .downloadable import Downloadable, QobuzDownloadable
 
 logger = logging.getLogger("streamrip")
 
@@ -195,7 +196,9 @@ class QobuzSpoofer:
         connector_kwargs = get_aiohttp_connector_kwargs(verify_ssl=True)
         connector = aiohttp.TCPConnector(**connector_kwargs)
 
-        self.session = aiohttp.ClientSession(connector=connector)
+        self.session = aiohttp.ClientSession(
+            connector=connector, timeout=aiohttp.ClientTimeout(total=20)
+        )
         return self
 
     async def __aexit__(self, *_):
@@ -215,77 +218,82 @@ class QobuzClient(Client):
             config.session.downloads.requests_per_minute,
         )
         self.secret: Optional[str] = None
+        self._token = ""
+        self._login_task: asyncio.Task | None = None
+        self._secret_lock = asyncio.Lock()
         self._spoof_cache: tuple[str, list[str]] | None = None
 
     async def login(self):
-        """User credentials require either a user token OR a user email & password.
-
-        A hash of the password is stored in self.config.qobuz.password_or_token.
-        This data as well as the app_id is passed to self._get_user_auth_token() to get
-        the actual credentials for the user.
-        """
+        """Share one authentication attempt across concurrent callers."""
         if self.logged_in:
-            raise AuthenticationError("Already logged in to Qobuz in this session")
+            return
+        if self._login_task is None:
+            self._login_task = asyncio.create_task(self._login())
+        task = self._login_task
+        try:
+            await task
+        finally:
+            if self._login_task is task:
+                self._login_task = None
 
+    async def _login(self):
         c = self.config.session.qobuz
-        downloads_cfg = self.config.session.downloads
-        if not c.email_or_userid or not c.password_or_token:
-            raise MissingCredentialsError
-
+        if not c.password_or_token or (not c.use_auth_token and not c.email_or_userid):
+            raise MissingCredentialsError("Missing Qobuz credentials")
+        downloads = self.config.session.downloads
         self.session = await self.get_session(
-            verify_ssl=downloads_cfg.verify_ssl,
-            connect_timeout=downloads_cfg.api_connect_timeout_seconds,
-            read_timeout=downloads_cfg.api_read_timeout_seconds,
+            verify_ssl=True,
+            connect_timeout=downloads.api_connect_timeout_seconds,
+            read_timeout=downloads.api_read_timeout_seconds,
         )
+        try:
+            self._app_id = c.app_id
+            if not self._app_id:
+                self._app_id, discovered_secrets = await self._get_app_id_and_secrets()
 
-        if not c.app_id or not c.secrets:
-            logger.info("App id/secrets not found, fetching")
-            c.app_id, c.secrets = await self._get_app_id_and_secrets()
-            # write to file
-            f = self.config.file
-            f.qobuz.app_id = c.app_id
-            f.qobuz.secrets = c.secrets
-            f.set_modified()
+            if c.use_auth_token:
+                self._token = c.password_or_token
+                _, profile = await self._api_request(
+                    "favorite/getUserFavorites", {"type": "albums", "limit": 1}
+                )
+                albums = profile.get("albums")
+                if not isinstance(albums, dict) or not isinstance(
+                    albums.get("items"), list
+                ):
+                    raise QobuzRequestError("Unexpected Qobuz favorites response")
+            else:
+                _, response = await self._api_request(
+                    "user/login",
+                    {"email": c.email_or_userid, "password": c.password_or_token},
+                    post=True,
+                )
+                user = response.get("user")
+                credential = user.get("credential") if isinstance(user, dict) else None
+                if (
+                    not isinstance(credential, dict)
+                    or not isinstance(response.get("user_auth_token"), str)
+                    or not response["user_auth_token"]
+                ):
+                    raise QobuzRequestError("Unexpected Qobuz login response")
+                if not credential.get("parameters"):
+                    raise IneligibleError(
+                        "Qobuz account is ineligible to stream tracks"
+                    )
+                self._token = response["user_auth_token"]
+            if not c.app_id:
+                c.app_id, c.secrets = self._app_id, discovered_secrets
+                self._save_app_credentials()
+            self.logged_in = True
+        finally:
+            if not self.logged_in:
+                self._token = ""
+                await self.session.close()
 
-        self.session.headers.update({"X-App-Id": str(c.app_id)})
-
-        if c.use_auth_token:
-            params = {
-                "user_id": c.email_or_userid,
-                "user_auth_token": c.password_or_token,
-                "app_id": str(c.app_id),
-            }
-        else:
-            params = {
-                "email": c.email_or_userid,
-                "password": c.password_or_token,
-                "app_id": str(c.app_id),
-            }
-
-        logger.debug("Login request params: %s", self._redact_sensitive_mapping(params))
-        status, resp = await self._api_request("user/login", params)
-        logger.debug("Login response summary: %s", self._login_response_summary(resp))
-
-        if status == 401:
-            raise AuthenticationError("Qobuz rejected credentials or user token")
-        if status == 400:
-            raise InvalidAppIdError("Qobuz rejected the configured app id")
-        if status != 200:
-            raise AuthenticationError(
-                f"Unexpected Qobuz login response ({status}): {resp.get('message', resp)}"
-            )
-
-        logger.debug("Logged in to Qobuz")
-
-        if not resp.get("user", {}).get("credential", {}).get("parameters"):
-            raise IneligibleError("Free accounts are not eligible to download tracks.")
-
-        uat = resp["user_auth_token"]
-        self.session.headers.update({"X-User-Auth-Token": uat})
-
-        self.secret = await self._get_valid_secret(c.secrets)
-
-        self.logged_in = True
+    def _save_app_credentials(self):
+        c = self.config.session.qobuz
+        self.config.file.qobuz.app_id = c.app_id
+        self.config.file.qobuz.secrets = list(c.secrets)
+        self.config.file.set_modified()
 
     async def get_metadata(self, item: str, media_type: str):
         if media_type == "label":
@@ -309,18 +317,13 @@ class QobuzClient(Client):
         if media_type in extras:
             params.update({"extra": extras[media_type]})
 
-        logger.debug(
-            "Qobuz metadata request params: %s",
-            self._redact_sensitive_mapping(params),
-        )
-
         epoint = f"{media_type}/get"
 
         status, resp = await self._api_request(epoint, params)
 
         if status != 200:
             raise NonStreamableError(
-                f'Error fetching metadata. Message: "{resp["message"]}"',
+                f"Qobuz metadata request failed (HTTP {status})",
             )
 
         return resp
@@ -350,9 +353,7 @@ class QobuzClient(Client):
         epoint = "label/get"
         status, label_resp = await self._api_request(epoint, params)
         if status != 200:
-            raise NonStreamableError(
-                f"Error fetching Qobuz label metadata: {label_resp.get('message', label_resp)}"
-            )
+            raise NonStreamableError(f"Qobuz label request failed (HTTP {status})")
         albums_count = label_resp["albums_count"]
 
         if albums_count <= page_limit:
@@ -379,12 +380,12 @@ class QobuzClient(Client):
             for result in results:
                 if isinstance(result, Exception):
                     raise NonStreamableError(
-                        f"Error fetching paginated Qobuz label metadata: {result}"
+                        f"Qobuz paginated label request failed ({type(result).__name__})"
                     )
                 status, resp = result
                 if status != 200:
                     raise NonStreamableError(
-                        f"Error fetching paginated Qobuz label metadata: {resp.get('message', resp)}"
+                        f"Qobuz paginated label request failed (HTTP {status})"
                     )
                 items.extend(resp["albums"]["items"])
 
@@ -425,38 +426,53 @@ class QobuzClient(Client):
     async def get_downloadable(self, item: str, quality: int) -> Downloadable:
         if not self.logged_in:
             raise AuthenticationError("Qobuz client is not logged in")
-        if self.secret is None:
-            raise InvalidAppSecretError("Missing validated Qobuz app secret")
         if not 1 <= quality <= 4:
             raise NonStreamableError(f"Unsupported Qobuz quality level: {quality}")
 
-        status, resp_json = await self._request_file_url(item, quality, self.secret)
-        if status == 401:
-            raise AuthenticationError("Qobuz rejected auth while requesting stream URL")
+        if self.secret is None:
+            async with self._secret_lock:
+                if self.secret is None:
+                    return await self._select_secret_and_get_url(item, quality)
+        status, result = await self._request_file_url(item, quality, self.secret)
         if status == 400:
-            raise NonStreamableError(
-                f"Qobuz signing failure or invalid request for track {item}: {resp_json.get('message', resp_json)}"
-            )
-        if status != 200:
-            raise NonStreamableError(
-                f"Qobuz track/getFileUrl failed ({status}) for track {item}: {resp_json.get('message', resp_json)}"
-            )
-        stream_url = resp_json.get("url")
+            raise NonStreamableError("Qobuz signing failure for track/getFileUrl")
+        return self._downloadable(result, quality)
 
-        if stream_url is None:
-            restrictions = resp_json["restrictions"]
-            if restrictions:
-                # Turn CamelCase code into a readable sentence
-                words = re.findall(r"([A-Z][a-z]+)", restrictions[0]["code"])
-                raise NonStreamableError(
-                    words[0] + " " + " ".join(map(str.lower, words[1:])) + ".",
+    async def _select_secret_and_get_url(self, item: str, quality: int) -> Downloadable:
+        c = self.config.session.qobuz
+        candidates = c.secrets
+        if not candidates:
+            if not c.app_id:
+                raise InvalidAppSecretError("Missing validated Qobuz app secret")
+            app_id, candidates = await self._get_app_id_and_secrets()
+            if str(app_id) != str(c.app_id):
+                raise InvalidAppIdError(
+                    "Discovered signing credentials use a different Qobuz app ID"
                 )
-            raise NonStreamableError(
-                f"Qobuz returned no stream URL for track {item}. It may be unavailable/non-streamable at this quality."
-            )
+        for secret in dict.fromkeys(candidates):
+            status, result = await self._request_file_url(item, quality, secret)
+            if status == 400:  # Only an explicit signature rejection reaches here.
+                continue
+            downloadable = self._downloadable(result, quality)
+            self.secret = secret
+            if not c.secrets:
+                c.secrets = list(candidates)
+                self._save_app_credentials()
+            return downloadable
+        raise InvalidAppSecretError(
+            "Qobuz rejected the configured application signing credentials"
+        )
 
-        return BasicDownloadable(
-            self.session, stream_url, "flac" if quality > 1 else "mp3", source="qobuz"
+    def _downloadable(self, result: dict, quality: int) -> Downloadable:
+        url = result.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise NonStreamableError(
+                "Qobuz returned no usable HTTPS stream URL at this quality"
+            )
+        if result.get("sample") in (True, 1, "1", "true"):
+            raise IneligibleError("Qobuz returned a preview instead of the full track")
+        return QobuzDownloadable(
+            self.session, url, "flac" if quality > 1 else "mp3", source="qobuz"
         )
 
     async def _paginate(
@@ -483,7 +499,7 @@ class QobuzClient(Client):
         status, page = await self._api_request(epoint, params)
         if status != 200:
             raise NonStreamableError(
-                f"Qobuz pagination request failed ({status}) for {epoint}: {page.get('message', page)}"
+                f"Qobuz pagination request failed ({status}) for {epoint}"
             )
         logger.debug("paginate: initial request made with status %d", status)
         # albums, tracks, etc.
@@ -519,12 +535,12 @@ class QobuzClient(Client):
             for result in results:
                 if isinstance(result, Exception):
                     raise NonStreamableError(
-                        f"Qobuz pagination page failed for {epoint}: {result}"
+                        f"Qobuz pagination page failed for {epoint}: {type(result).__name__}"
                     )
                 status, resp = result
                 if status != 200:
                     raise NonStreamableError(
-                        f"Qobuz pagination page failed ({status}) for {epoint}: {resp.get('message', resp)}"
+                        f"Qobuz pagination page failed ({status}) for {epoint}"
                     )
                 pages.append(resp)
 
@@ -539,29 +555,16 @@ class QobuzClient(Client):
             try:
                 self._spoof_cache = await spoofer.get_app_id_and_secrets()
                 return self._spoof_cache
-            except RuntimeError as e:
-                raise InvalidAppIdError(
-                    f"Could not extract Qobuz app id/secrets from current web-player assets: {e}"
-                )
-
-    async def _test_secret(self, secret: str) -> Optional[str]:
-        status, _ = await self._request_file_url("19512574", 4, secret)
-        if status == 400:
-            return None
-        if status == 200 or status == 401:
-            return secret
-        logger.warning("Got status %d when testing secret", status)
-        return None
-
-    async def _get_valid_secret(self, secrets: list[str]) -> str:
-        results = await asyncio.gather(
-            *[self._test_secret(secret) for secret in secrets],
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                RuntimeError,
+                ValueError,
+            ):
+                pass
+        raise InvalidAppIdError(
+            "Could not obtain Qobuz application credentials from web assets"
         )
-        working_secrets = [r for r in results if r is not None]
-        if len(working_secrets) == 0:
-            raise InvalidAppSecretError(secrets)
-
-        return working_secrets[0]
 
     async def _request_file_url(
         self,
@@ -582,38 +585,98 @@ class QobuzClient(Client):
         }
         return await self._api_request("track/getFileUrl", params)
 
-    async def _api_request(self, epoint: str, params: dict) -> tuple[int, dict]:
-        """Make a request to the API.
-        returns: status code, json parsed response
-        """
+    async def _api_request(
+        self, epoint: str, params: dict, *, post: bool = False
+    ) -> tuple[int, dict]:
+        """Credentials belong only on this API origin, never on the media session."""
+        if not re.fullmatch(r"[a-zA-Z]+/[a-zA-Z]+", epoint):
+            raise QobuzRequestError("Invalid Qobuz API endpoint")
         url = f"{QOBUZ_BASE_URL}/{epoint}"
-        logger.debug(
-            "api_request: endpoint=%s, params=%s",
-            epoint,
-            self._redact_sensitive_mapping(params),
-        )
+        headers = {"X-App-Id": str(self._app_id)}
+        if self._token:
+            headers["X-User-Auth-Token"] = self._token
         policy = self.network_retry_policy(self.config.session.downloads)
+        transient = {408, 429, 500, 502, 503, 504}
 
-        async def _call() -> tuple[int, dict]:
+        async def call():
             async with self.rate_limiter:
-                async with self.session.get(url, params=params) as response:
-                    if response.status in {408, 429, 500, 502, 503, 504}:
-                        # Avoid raising on non-JSON transient bodies so the
-                        # status-based retry predicate can fire.
-                        return response.status, {}
-                    return response.status, await response.json()
+                async with self.session.request(
+                    "POST" if post else "GET",
+                    url,
+                    headers=headers,
+                    allow_redirects=False,
+                    **({"data": params} if post else {"params": params}),
+                ) as response:
+                    status = response.status
+                    mime = response.content_type
+                    if mime.endswith("+json"):
+                        mime = "application/json"
+                    if mime not in {"application/json", "text/plain", "text/html"}:
+                        mime = "other"
+                    body = None
+                    if mime == "application/json" and status in {200, 400, 401}:
+                        try:
+                            body = await response.json()
+                        except (ValueError, LookupError, aiohttp.ContentTypeError):
+                            pass
+                    return status, mime, body
 
-        return await aiohttp_call_with_retry(
-            _call,
-            operation=f"qobuz_api:{epoint}",
-            attempts=policy.attempts,
-            delay_seconds=policy.delay_seconds,
-            backoff=policy.backoff,
-            should_retry_result=lambda response: (
-                response[0] in {408, 429, 500, 502, 503, 504},
-                f"http_{response[0]}",
-            ),
-        )
+        try:
+            status, mime, body = await aiohttp_call_with_retry(
+                call,
+                operation=f"qobuz_api:{epoint}",
+                attempts=1 if post else policy.attempts,
+                delay_seconds=policy.delay_seconds,
+                backoff=policy.backoff,
+                should_retry_result=lambda r: (r[0] in transient, f"http_{r[0]}"),
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            # Discard request_info, URLs, nested exceptions and remote messages.
+            failure = (
+                "timeout"
+                if isinstance(exc, asyncio.TimeoutError)
+                else type(exc).__name__
+            )
+        else:
+            return self._classify_response(epoint, status, mime, body)
+        raise QobuzRequestError(f"Qobuz {epoint}: {failure}")
+
+    @staticmethod
+    def _classify_response(epoint, status, mime, body) -> tuple[int, dict]:
+        summary = f"Qobuz {epoint} (HTTP {status}, {mime})"
+        if status == 200 and isinstance(body, dict):
+            return status, body
+        message = body.get("message") if isinstance(body, dict) else None
+        reason = message.lower() if isinstance(message, str) else ""
+        if status in {400, 401} and any(
+            part in reason for part in ("app_id", "app id", "application id")
+        ):
+            raise InvalidAppIdError(f"{summary}: application ID rejected")
+        if status == 401 and isinstance(body, dict):
+            if "expired" in reason:
+                raise AuthenticationError(
+                    f"{summary}: credentials expired; renew them in the web player"
+                )
+            raise AuthenticationError(
+                f"{summary}: credentials rejected; check token validity and application ID"
+            )
+        if (
+            status == 400
+            and epoint == "track/getFileUrl"
+            and ("signature" in reason or "request_sig" in reason)
+        ):
+            return status, {}
+        if status == 403:
+            raise QobuzRequestError(
+                f"{summary}: access denied; check service or network access"
+            )
+        if status == 410 and epoint == "track/getFileUrl":
+            raise QobuzRequestError(
+                f"{summary}: legacy single-file streaming endpoint unavailable"
+            )
+        if status == 200:
+            raise QobuzRequestError(f"{summary}: expected a JSON object")
+        raise QobuzRequestError(f"{summary}: request failed")
 
     @staticmethod
     def _redact_sensitive_mapping(payload: dict) -> dict:

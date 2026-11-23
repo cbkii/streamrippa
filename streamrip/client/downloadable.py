@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.client import HTTPException
 from typing import Any, Callable, Optional
 
@@ -23,7 +23,7 @@ from Cryptodome.Cipher import AES, Blowfish
 from Cryptodome.Util import Counter
 
 from .. import converter
-from ..exceptions import NonStreamableError
+from ..exceptions import NonStreamableError, QobuzRequestError
 
 logger = logging.getLogger("streamrip")
 
@@ -118,7 +118,7 @@ async def _aiohttp_stream_download(
 @dataclass(slots=True)
 class Downloadable(ABC):
     session: aiohttp.ClientSession
-    url: str
+    url: str = field(repr=False)
     extension: str
     source: str = "Unknown"
     _size_base: Optional[int] = None
@@ -177,6 +177,25 @@ class BasicDownloadable(Downloadable):
                 self.source,
             )
             await _aiohttp_stream_download(path, self.url, self.session, callback)
+
+
+class QobuzDownloadable(BasicDownloadable):
+    """Use the credential-free session and keep signed CDN URLs out of errors."""
+
+    async def size(self) -> int:
+        try:
+            return await super().size()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            category = type(exc).__name__
+        raise QobuzRequestError(f"Qobuz media size request failed ({category})")
+
+    async def _download(self, path: str, callback):
+        try:
+            await _aiohttp_stream_download(path, self.url, self.session, callback)
+            return
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            category = type(exc).__name__
+        raise QobuzRequestError(f"Qobuz media download failed ({category})")
 
 
 class DeezerDownloadable(Downloadable):

@@ -4,8 +4,8 @@ import copy
 import functools
 import logging
 import os
-import shutil
-from dataclasses import dataclass, fields
+import tempfile
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import click
@@ -27,25 +27,25 @@ class OutdatedConfigError(Exception):
 @dataclass(slots=True)
 class QobuzConfig:
     use_auth_token: bool
-    email_or_userid: str
+    email_or_userid: str = field(repr=False)
     # This is an md5 hash of the plaintext password
-    password_or_token: str
+    password_or_token: str = field(repr=False)
     # Do not change
-    app_id: str
+    app_id: str = field(repr=False)
     quality: int
     # This will download booklet pdfs that are included with some albums
     download_booklets: bool
     # Do not change
-    secrets: list[str]
+    secrets: list[str] = field(repr=False)
 
 
 @dataclass(slots=True)
 class TidalConfig:
     # Do not change any of the fields below
-    user_id: str
+    user_id: str = field(repr=False)
     country_code: str
-    access_token: str
-    refresh_token: str
+    access_token: str = field(repr=False)
+    refresh_token: str = field(repr=False)
     # Tokens last 1 week after refresh. This is the Unix timestamp of the expiration
     # time. If you haven't used streamrip in more than a week, you may have to log
     # in again using `rip config --tidal`
@@ -61,7 +61,7 @@ class DeezerConfig:
     # An authentication cookie that allows streamrip to use your Deezer account
     # See https://github.com/nathom/streamrip/wiki/Finding-Your-Deezer-ARL-Cookie
     # for instructions on how to find this
-    arl: str
+    arl: str = field(repr=False)
     # 0, 1, or 2
     # This only applies to paid Deezer subscriptions. Those using deezloader
     # are automatically limited to quality = 1
@@ -79,7 +79,7 @@ class DeezerConfig:
 @dataclass(slots=True)
 class SoundcloudConfig:
     # This changes periodically, so it needs to be updated
-    client_id: str
+    client_id: str = field(repr=False)
     app_version: str
     # Only 0 is available for now
     quality: int
@@ -343,7 +343,7 @@ assert os.path.isfile(BLANK_CONFIG_PATH), "Template config not found"
 
 @dataclass(slots=True)
 class ConfigData:
-    toml: TOMLDocument
+    toml: TOMLDocument = field(repr=False)
     downloads: DownloadsConfig
 
     qobuz: QobuzConfig
@@ -538,9 +538,8 @@ class Config:
         if not self.file.modified:
             return
 
-        with open(self.path, "w") as toml_file:
-            self.file.update_toml()
-            toml_file.write(dumps(self.file.toml))
+        self.file.update_toml()
+        _write_private_toml(self.path, self.file.toml)
 
     @staticmethod
     def _update_file(old_path: str, new_path: str):
@@ -555,8 +554,7 @@ class Config:
 
         update_config(old_toml, new_toml)
 
-        with open(old_path, "w") as f:
-            f.write(dumps(new_toml))
+        _write_private_toml(old_path, new_toml)
 
     @classmethod
     def update_file(cls, path: str):
@@ -575,15 +573,26 @@ class Config:
 
 def set_user_defaults(path: str, /):
     """Update the TOML file at the path with user-specific default values."""
-    shutil.copy(BLANK_CONFIG_PATH, path)
-
-    with open(path) as f:
+    with open(BLANK_CONFIG_PATH) as f:
         toml = parse(f.read())
 
     toml_set_user_defaults(toml)
 
-    with open(path, "w") as f:
-        f.write(dumps(toml))
+    _write_private_toml(path, toml)
+
+
+def _write_private_toml(path, toml):
+    """Publish a complete owner-only config, preserving symlink destinations."""
+    target = Path(path).resolve()
+    temp = tempfile.NamedTemporaryFile(
+        dir=target.parent, mode="w", encoding="utf-8", delete=False
+    )
+    try:
+        with temp:
+            temp.write(dumps(toml))
+        os.replace(temp.name, target)
+    finally:
+        Path(temp.name).unlink(missing_ok=True)
 
 
 def toml_set_user_defaults(toml: TOMLDocument):
