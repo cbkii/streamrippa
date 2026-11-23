@@ -193,8 +193,11 @@ checks streaming entitlement, the signing credentials, and media delivery.
 To check the session without downloading, run
 `rip search --num-results 1 --output-file results.json qobuz track "One More Time"`.
 A JSON 401 can indicate rejected credentials or an app-ID mismatch. An HTML 403 means
-the request was denied before a usable API response arrived. Ask Qobuz support to
-check access for the affected network. HTTP 410 on `track/getFileUrl` means single-file
+the request was denied before a usable API response arrived. When using a VPN,
+verify the public egress and DNS from the same process context as the CLI.
+Qualify authentication, search and a full authorized track on that connection.
+For unattended jobs, keep the verified tunnel stable for the batch and fail
+closed if it disconnects. HTTP 410 on `track/getFileUrl` means single-file
 delivery is unavailable on that endpoint. Changing tokens cannot restore a retired endpoint.
 For troubleshooting, share only the endpoint name, HTTP status and content type.
 Keep request URLs, tokens, cookies, config files and raw response bodies private.
